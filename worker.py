@@ -103,8 +103,7 @@ def download_and_upload(video_id: str) -> tuple[str, int, str]:
             "--no-playlist",
             "--retries", "1",
             "--socket-timeout", "30",
-            "--extractor-args", "youtube:player_client=web",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "--extractor-args", "youtube:player_client=ios",
         ]
         # Support optional cookies file for YouTube auth
         cookies_path = os.environ.get("COOKIES_FILE", "")
