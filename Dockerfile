@@ -14,7 +14,7 @@ RUN apt-get update \
 # Build the bgutil JS side (required by the Python plugin)
 RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
     && cd /bgutil \
-    && npm ci \
+    && npm install \
     && npx tsc
 
 COPY requirements.txt .
