@@ -14,7 +14,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
-COPY worker.py entrypoint.sh ./
-RUN chmod +x entrypoint.sh
+COPY worker.py .
 
-CMD ["./entrypoint.sh"]
+CMD ["sh", "-c", "npx --yes bgutil-ytdlp-pot-provider serve & sleep 3 && exec python -u worker.py"]
