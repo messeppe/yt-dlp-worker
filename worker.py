@@ -97,7 +97,7 @@ def download_and_upload(video_id: str) -> tuple[str, int, str]:
         cmd = [
             "yt-dlp",
             "--proxy", PROXY_URL,
-            "-f", "bv*+ba/b",
+            "-f", "bv*+ba/best/bestvideo+bestaudio",
             "--concurrent-fragments", "2",
             "--limit-rate", "2.5M",
             "--no-playlist",
@@ -135,7 +135,7 @@ def process(video_id: str):
     log.info(f"[START] {video_id}")
 
     if not claim_job(video_id):
-        log.warning(f"[SKIP]  {video_id} — already claimed by another worker")
+        log.warning(f"[SKIP]  {video_id} -- already claimed by another worker")
         return
 
     try:
@@ -150,6 +150,13 @@ def process(video_id: str):
 
 
 def main():
+    # Verify Node.js is available (required for YouTube n-challenge solving)
+    node_check = subprocess.run(["node", "--version"], capture_output=True, text=True)
+    if node_check.returncode == 0:
+        log.info(f"Node.js {node_check.stdout.strip()} detected -- n-challenge solver enabled")
+    else:
+        log.warning("Node.js NOT found -- YouTube downloads may fail with 'n challenge solving failed'")
+
     r = get_redis()
     log.info("Worker started, polling video_queue...")
     while True:
