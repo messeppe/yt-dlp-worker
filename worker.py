@@ -78,9 +78,6 @@ def mark_failed(video_id: str, error: str):
 
 
 def make_sticky_proxies(exclude: set | None = None) -> dict:
-    """Pick a numbered Webshare proxy (fixed IP). Same number = same exit IP for all requests."""
-    # PROXY_URL format: http://rcqplwgm-rotate:PASS@p.webshare.io:80
-    # Numbered format:  http://rcqplwgm-N:PASS@p.webshare.io:80  (1-100, each a fixed IP)
     pool = set(range(1, 101)) - (exclude or set())
     n = random.choice(list(pool))
     if exclude is not None:
