@@ -1,6 +1,6 @@
 yt-dlp
 yt-dlp-get-pot
-bgutil-yt-dlp-pot-provider
+bgutil-ytdlp-pot-provider
 redis
 boto3
 psycopg2-binary
