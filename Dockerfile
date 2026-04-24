@@ -14,6 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
-COPY worker.py .
+COPY worker.py entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
-CMD ["python", "-u", "worker.py"]
+CMD ["./entrypoint.sh"]
