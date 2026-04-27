@@ -1,17 +1,14 @@
 import os
+import signal
+import threading
 import time
 import logging
-import tempfile
-import subprocess
 
 import requests
-import redis
 import boto3
 import psycopg2
+import psycopg2.pool
 
-REDIS_HOST     = os.environ["REDIS_HOST"]
-REDIS_PORT     = int(os.environ.get("REDIS_PORT", "6379"))
-REDIS_PASSWORD = os.environ["REDIS_PASSWORD"]
 PROXY_URL      = os.environ["PROXY_URL"]
 S3_ENDPOINT    = os.environ["S3_ENDPOINT"]
 S3_BUCKET      = os.environ["S3_BUCKET"]
@@ -19,109 +16,113 @@ S3_ACCESS_KEY  = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY  = os.environ["S3_SECRET_KEY"]
 DB_URL         = os.environ["SUPABASE_DB_URL"]
 RAPIDAPI_KEY   = os.environ["RAPIDAPI_KEY"]
+RAPIDAPI_HOST  = os.environ["RAPIDAPI_HOST"]
+POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
 
-RAPIDAPI_HOST = "youtube-video-and-shorts-downloader.p.rapidapi.com"
-QUEUE_NAME    = "video_queue"
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 log = logging.getLogger(__name__)
 
+_shutdown = threading.Event()
 
-def get_redis():
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
+
+def handle_sigterm(signum, frame):
+    log.info("SIGTERM received — finishing current job then exiting")
+    _shutdown.set()
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+
+
+def make_sticky_proxy(n: int) -> dict:
+    url = PROXY_URL.replace("-rotate", f"-{n}", 1)
+    return {"http": url, "https": url}
 
 
 def get_s3():
-    return boto3.client("s3", endpoint_url=S3_ENDPOINT,
-                        aws_access_key_id=S3_ACCESS_KEY, aws_secret_access_key=S3_SECRET_KEY)
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+    )
 
 
-def claim_job(video_id: str) -> bool:
-    with psycopg2.connect(DB_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE youtube.videos
-                   SET media_status = 'processing',
-                       locked_until = NOW() + INTERVAL '30 minutes'
-                   WHERE id = %s AND media_status = 'queued'""",
-                (video_id,)
+def poll_job(conn):
+    """Claim one queued video atomically. Returns (video_id, channel_handle) or (None, None)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE youtube.videos v
+            SET media_status = 'processing',
+                locked_until = NOW() + INTERVAL '5 minutes'
+            WHERE v.id = (
+                SELECT id FROM youtube.videos
+                WHERE media_status = 'queued'
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
             )
-            return cur.rowcount == 1
+            RETURNING
+                v.id,
+                (SELECT COALESCE(c.handle, c.title)
+                 FROM youtube.channels c WHERE c.id = v.channel_id) AS channel_handle
+            """
+        )
+        row = cur.fetchone()
+        conn.commit()
+    if row:
+        return row[0], row[1] or "unknown"
+    return None, None
 
 
-def mark_complete(video_id: str, s3_path: str, file_size: int, file_ext: str):
-    with psycopg2.connect(DB_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO youtube.media_files
-                     (video_id, media_type, format, quality_or_itag,
-                      s3_path, file_size_bytes, mime_type, download_source)
-                   VALUES (%s, 'video', %s, 'merged', %s, %s, 'video/mp4', 'rapidapi')
-                   ON CONFLICT DO NOTHING""",
-                (video_id, file_ext, s3_path, file_size)
-            )
-            cur.execute(
-                "UPDATE youtube.videos SET media_status = 'completed', locked_until = NULL WHERE id = %s",
-                (video_id,)
-            )
+def renew_lock(conn, video_id: str, stop_event: threading.Event):
+    """Background thread: extend locked_until every 60s until stop_event is set."""
+    while not stop_event.wait(60):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE youtube.videos SET locked_until = NOW() + INTERVAL '5 minutes' WHERE id = %s",
+                    (video_id,),
+                )
+                conn.commit()
+        except Exception as e:
+            log.warning(f"[HEARTBEAT] {video_id}: {e}")
 
 
-def mark_failed(video_id: str, error: str):
-    with psycopg2.connect(DB_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE youtube.videos
-                   SET media_status = 'failed', locked_until = NULL, media_last_error = %s
-                   WHERE id = %s""",
-                (error[:500], video_id)
-            )
-
-
-def get_streams(video_id: str) -> tuple[str, str]:
-    """Returns (video_url, audio_url) from RapidAPI download.php."""
+def get_streams(video_id: str, proxies: dict) -> list:
+    url = f"https://{RAPIDAPI_HOST}/download.php"
     resp = requests.get(
-        f"https://{RAPIDAPI_HOST}/download.php",
-        params={"id": video_id},
+        url,
         headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
-        timeout=30,
+        params={"id": video_id},
+        proxies=proxies,
+        timeout=(10, 30),
     )
     resp.raise_for_status()
     data = resp.json()
-    log.info(f"[RAPIDAPI] keys={list(data.keys())}")
-
-    video_url = audio_url = None
-
-    videos = data.get("video") or data.get("videos") or []
-    audios = data.get("audio") or data.get("audios") or []
-
-    # If API returns separate video/audio lists, pick best quality from each
-    if videos and audios:
-        # Sort by resolution descending (prefer 1080 > 720 > 480 ...)
-        def res(f):
-            return int("".join(filter(str.isdigit, str(f.get("quality", f.get("resolution", "0"))))) or "0")
-        video_url = sorted(videos, key=res, reverse=True)[0]["url"]
-        # Prefer itag 140 (AAC 128kbps) for audio; otherwise just take first
-        audio_entries = sorted(audios, key=lambda f: 1 if str(f.get("itag")) == "140" else 0, reverse=True)
-        audio_url = audio_entries[0]["url"]
-
-    # Fallback: flat formats list — split into video-only and audio-only by mime/type field
-    elif "formats" in data:
-        fmts = data["formats"]
-        v_fmts = [f for f in fmts if "video" in f.get("type", f.get("mime", "")) and "audio" not in f.get("type", f.get("mime", ""))]
-        a_fmts = [f for f in fmts if "audio" in f.get("type", f.get("mime", "")) and "video" not in f.get("type", f.get("mime", ""))]
-        if v_fmts:
-            video_url = sorted(v_fmts, key=lambda f: int("".join(filter(str.isdigit, str(f.get("quality", "0")))) or "0"), reverse=True)[0]["url"]
-        if a_fmts:
-            audio_url = a_fmts[0]["url"]
-
-    if not video_url or not audio_url:
-        raise RuntimeError(f"Could not extract video+audio URLs. Response keys: {list(data.keys())}")
-
-    return video_url, audio_url
+    return data.get("results", [])
 
 
-def stream_download(url: str, dest: str):
-    proxies = {"http": PROXY_URL, "https": PROXY_URL}
+def pick_streams(results: list):
+    """Return (combined_stream, None) or (video_stream, audio_stream)."""
+    combined = [r for r in results if r.get("has_video") and r.get("has_audio")]
+    if combined:
+        best = sorted(combined, key=lambda r: r.get("quality", ""), reverse=True)[0]
+        return best, None
+
+    videos = [r for r in results if r.get("has_video") and not r.get("has_audio")]
+    audios = [r for r in results if r.get("has_audio") and not r.get("has_video")]
+    if not videos or not audios:
+        return None, None
+
+    best_v = sorted(videos, key=lambda r: r.get("quality", ""), reverse=True)[0]
+    best_a = sorted(audios, key=lambda r: r.get("quality", ""), reverse=True)[0]
+    return best_v, best_a
+
+
+def download_stream(url: str, dest: str, proxies: dict):
     with requests.get(url, proxies=proxies, stream=True, timeout=600) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
@@ -129,62 +130,197 @@ def stream_download(url: str, dest: str):
                 f.write(chunk)
 
 
-def download_and_upload(video_id: str) -> tuple[str, int, str]:
-    video_url, audio_url = get_streams(video_id)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        video_path  = os.path.join(tmpdir, "video.mp4")
-        audio_path  = os.path.join(tmpdir, "audio.m4a")
-        merged_path = os.path.join(tmpdir, "merged.mp4")
-
-        log.info(f"[DOWNLOAD] Fetching video stream for {video_id}")
-        stream_download(video_url, video_path)
-
-        log.info(f"[DOWNLOAD] Fetching audio stream for {video_id}")
-        stream_download(audio_url, audio_path)
-
-        log.info(f"[MERGE] Merging streams for {video_id}")
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", video_path, "-i", audio_path,
-             "-c:v", "copy", "-c:a", "copy", merged_path],
-            capture_output=True, text=True, timeout=300,
+def mark_complete(conn, video_id: str, files: list):
+    """files: list of (s3_path, file_size, media_type, mime_type)"""
+    with conn.cursor() as cur:
+        for s3_path, file_size, media_type, mime_type in files:
+            cur.execute(
+                """INSERT INTO youtube.media_files
+                     (video_id, media_type, format, quality_or_itag,
+                      s3_path, file_size_bytes, mime_type, download_source)
+                   VALUES (%s, %s, %s, 'auto', %s, %s, %s, 'rapidapi')
+                   ON CONFLICT DO NOTHING""",
+                (video_id, media_type, mime_type.split("/")[-1], s3_path, file_size, mime_type),
+            )
+        cur.execute(
+            "UPDATE youtube.videos SET media_status = 'completed', locked_until = NULL WHERE id = %s",
+            (video_id,),
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg merge failed: {result.stderr[-300:]}")
-
-        file_size = os.path.getsize(merged_path)
-        s3_key = f"media/{video_id}/video.mp4"
-        get_s3().upload_file(merged_path, S3_BUCKET, s3_key)
-        return s3_key, file_size, "mp4"
+        conn.commit()
 
 
-def process(video_id: str):
-    log.info(f"[START] {video_id}")
+def mark_failed(conn, video_id: str, error: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE youtube.videos
+               SET media_status = 'failed',
+                   locked_until = NULL,
+                   media_last_error = %s,
+                   media_retry_count = media_retry_count + 1
+               WHERE id = %s""",
+            (error[:500], video_id),
+        )
+        conn.commit()
 
-    if not claim_job(video_id):
-        log.warning(f"[SKIP]  {video_id} -- already claimed by another worker")
-        return
+
+def reset_to_queued(conn, video_id: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE youtube.videos SET media_status = 'queued', locked_until = NULL WHERE id = %s",
+            (video_id,),
+        )
+        conn.commit()
+
+
+def process(conn, video_id: str, channel_handle: str):
+    import tempfile
+
+    s3 = get_s3()
+    used_proxies = set()
+    last_error = "no attempts made"
+
+    stop_heartbeat = threading.Event()
+    heartbeat = threading.Thread(
+        target=renew_lock, args=(conn, video_id, stop_heartbeat), daemon=True
+    )
+    heartbeat.start()
 
     try:
-        t0 = time.time()
-        s3_key, file_size, ext = download_and_upload(video_id)
-        elapsed = time.time() - t0
-        mark_complete(video_id, s3_key, file_size, ext)
-        log.info(f"[SUCCESS] {video_id} -> s3://{S3_BUCKET}/{s3_key} ({file_size} bytes, {elapsed:.0f}s)")
-    except Exception as exc:
-        log.error(f"[ERROR] {video_id}: {exc}")
-        mark_failed(video_id, str(exc))
+        for attempt in range(1, 6):
+            # Pick a proxy not used yet
+            proxy_n = next((n for n in range(1, 101) if n not in used_proxies), None)
+            if proxy_n is None:
+                break
+            used_proxies.add(proxy_n)
+            proxies = make_sticky_proxy(proxy_n)
+
+            log.info(f"[ATTEMPT {attempt}/5] {video_id} proxy={proxy_n}")
+
+            try:
+                results = get_streams(video_id, proxies)
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                if status in (400, 404):
+                    last_error = f"RapidAPI permanent error {status}"
+                    log.error(f"[FAIL-PERM] {video_id}: {last_error}")
+                    mark_failed(conn, video_id, last_error)
+                    return
+                if status == 429:
+                    log.warning(f"[RATE-LIMIT] {video_id}: backing off 60s")
+                    time.sleep(60)
+                    used_proxies.discard(proxy_n)  # don't count 429 as a proxy failure
+                    continue
+                last_error = f"RapidAPI HTTP {status}"
+                log.warning(f"[RETRY] {video_id}: {last_error}")
+                continue
+            except Exception as e:
+                last_error = str(e)
+                log.warning(f"[RETRY] {video_id}: RapidAPI error: {e}")
+                continue
+
+            if not results:
+                last_error = "RapidAPI returned empty results"
+                log.warning(f"[RETRY] {video_id}: {last_error}")
+                continue
+
+            video_stream, audio_stream = pick_streams(results)
+            if video_stream is None:
+                last_error = "no usable streams in RapidAPI results"
+                log.warning(f"[RETRY] {video_id}: {last_error}")
+                continue
+
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    uploaded = []
+
+                    if audio_stream is None:
+                        # Combined stream
+                        ext = video_stream.get("mime", "video/mp4").split("/")[-1]
+                        local = os.path.join(tmpdir, f"video.{ext}")
+                        log.info(f"[DOWNLOAD] combined stream {video_id}")
+                        download_stream(video_stream["url"], local, proxies)
+                        size = os.path.getsize(local)
+                        key = f"{channel_handle}/{video_id}/video.{ext}"
+                        s3.upload_file(local, S3_BUCKET, key)
+                        uploaded.append((key, size, "video", video_stream.get("mime", "video/mp4")))
+                    else:
+                        # Separate video + audio
+                        vext = video_stream.get("mime", "video/mp4").split("/")[-1]
+                        aext = audio_stream.get("mime", "audio/m4a").split("/")[-1]
+                        vlocal = os.path.join(tmpdir, f"video.{vext}")
+                        alocal = os.path.join(tmpdir, f"audio.{aext}")
+
+                        log.info(f"[DOWNLOAD] video stream {video_id}")
+                        download_stream(video_stream["url"], vlocal, proxies)
+                        log.info(f"[DOWNLOAD] audio stream {video_id}")
+                        download_stream(audio_stream["url"], alocal, proxies)
+
+                        vsize = os.path.getsize(vlocal)
+                        asize = os.path.getsize(alocal)
+                        vkey = f"{channel_handle}/{video_id}/video.{vext}"
+                        akey = f"{channel_handle}/{video_id}/audio.{aext}"
+                        s3.upload_file(vlocal, S3_BUCKET, vkey)
+                        s3.upload_file(alocal, S3_BUCKET, akey)
+                        uploaded.append((vkey, vsize, "video", video_stream.get("mime", "video/mp4")))
+                        uploaded.append((akey, asize, "audio", audio_stream.get("mime", "audio/m4a")))
+
+                    mark_complete(conn, video_id, uploaded)
+                    log.info(f"[SUCCESS] {video_id} files={[u[0] for u in uploaded]}")
+                    return
+
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                last_error = f"CDN HTTP {status}"
+                log.warning(f"[RETRY] {video_id}: {last_error}")
+            except Exception as e:
+                last_error = str(e)
+                log.warning(f"[RETRY] {video_id}: download/upload error: {e}")
+
+        log.error(f"[FAIL] {video_id}: all attempts exhausted — {last_error}")
+        mark_failed(conn, video_id, last_error)
+
+    finally:
+        stop_heartbeat.set()
 
 
 def main():
-    r = get_redis()
-    log.info("Worker started, polling video_queue...")
+    log.info("Worker started, polling Postgres for queued videos...")
+
     while True:
-        video_id = r.rpop(QUEUE_NAME)
-        if video_id:
-            process(video_id)
-        else:
-            time.sleep(2)
+        try:
+            conn = psycopg2.connect(DB_URL)
+            break
+        except Exception as e:
+            log.error(f"DB connect failed: {e} — retrying in 10s")
+            time.sleep(10)
+
+    try:
+        while not _shutdown.is_set():
+            try:
+                video_id, channel_handle = poll_job(conn)
+            except Exception as e:
+                log.error(f"poll_job error: {e} — reconnecting")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                time.sleep(5)
+                try:
+                    conn = psycopg2.connect(DB_URL)
+                except Exception:
+                    pass
+                continue
+
+            if video_id:
+                process(conn, video_id, channel_handle)
+            else:
+                _shutdown.wait(POLL_INTERVAL)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        log.info("Worker shut down cleanly")
 
 
 if __name__ == "__main__":
