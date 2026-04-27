@@ -107,17 +107,30 @@ def get_streams(video_id: str, proxies: dict) -> list:
 
 def pick_streams(results: list):
     """Return (combined_stream, None) or (video_stream, audio_stream)."""
-    combined = [r for r in results if r.get("has_video") and r.get("has_audio")]
+    def has_v(r):
+        return r.get("has_video") or r.get("mime", "").startswith("video/")
+    
+    def has_a(r):
+        return r.get("has_audio")
+
+    def v_quality(r):
+        q = r.get("quality", "")
+        try:
+            return int("".join(c for c in q if c.isdigit()))
+        except ValueError:
+            return 0
+
+    combined = [r for r in results if has_v(r) and has_a(r)]
     if combined:
-        best = sorted(combined, key=lambda r: r.get("quality", ""), reverse=True)[0]
+        best = sorted(combined, key=v_quality, reverse=True)[0]
         return best, None
 
-    videos = [r for r in results if r.get("has_video") and not r.get("has_audio")]
-    audios = [r for r in results if r.get("has_audio") and not r.get("has_video")]
+    videos = [r for r in results if has_v(r) and not has_a(r)]
+    audios = [r for r in results if has_a(r) and not has_v(r)]
     if not videos or not audios:
         return None, None
 
-    best_v = sorted(videos, key=lambda r: r.get("quality", ""), reverse=True)[0]
+    best_v = sorted(videos, key=v_quality, reverse=True)[0]
     best_a = sorted(audios, key=lambda r: r.get("quality", ""), reverse=True)[0]
     return best_v, best_a
 
