@@ -2,7 +2,7 @@
 set -e
 
 # Start bgutil POT server in background
-cd /bgutil/server && node build/main.js &
+cd /bgutil/server && node build/main.js --host 127.0.0.1 &
 BGUTIL_PID=$!
 
 # Wait for it to be ready
