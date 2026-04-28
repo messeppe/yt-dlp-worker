@@ -5,10 +5,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Build bgutil POT server from source
-RUN git clone --depth=1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
-    && cd /bgutil \
+RUN git clone --single-branch --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
+    && cd /bgutil/server \
     && npm install \
-    && npm run build
+    && npx tsc
 
 COPY requirements_ytdlp.txt .
 RUN pip install --no-cache-dir -r requirements_ytdlp.txt
