@@ -177,7 +177,7 @@ def process(conn, video_id: str, channel_handle: str):
                     "quiet": True,
                     "no_warnings": False,
                     "logger": YtDlpLogger(),
-                    "extractor_args": {"youtube": {"player_client": ["web"]}},
+                    "extractor_args": {"youtube": {"player_client": ["web", "mweb", "android", "ios"]}},
                     "retries": 3,
                     "fragment_retries": 5,
                     "concurrent_fragment_downloads": 4,
