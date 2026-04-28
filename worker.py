@@ -79,8 +79,12 @@ def poll_job(conn):
             )
             RETURNING
                 v.id,
-                (SELECT COALESCE(c.handle, c.title)
-                 FROM youtube.channels c WHERE c.id = v.channel_id) AS channel_handle
+                COALESCE(
+                    (SELECT NULLIF(c.handle, '') FROM youtube.channels c WHERE c.id = v.channel_id),
+                    (SELECT NULLIF(c.title, '') FROM youtube.channels c WHERE c.id = v.channel_id),
+                    NULLIF(v.channel_id, ''),
+                    'unknown'
+                ) AS channel_handle
             """
         )
         row = cur.fetchone()
@@ -110,6 +114,14 @@ def sanitize_filename(s: str) -> str:
     s = re.sub(r'[\\/*?:"<>|]', '', s)
     s = re.sub(r'\s+', ' ', s).strip()
     return s[:120]
+
+
+def sanitize_path_segment(s: str) -> str:
+    """Sanitize folder/file path segments for S3 keys."""
+    import re
+    s = re.sub(r'[\\/*?:"<>|]', '', s or '')
+    s = re.sub(r'\s+', '_', s).strip("._ ")
+    return s[:80] or "unknown"
 
 
 def get_streams(video_id: str, proxies: dict):
@@ -211,6 +223,7 @@ def process(conn, video_id: str, channel_handle: str):
     import tempfile
 
     s3 = get_s3()
+    safe_channel = sanitize_path_segment(channel_handle)
     used_proxies = set()
     last_error = "no attempts made"
 
@@ -283,7 +296,7 @@ def process(conn, video_id: str, channel_handle: str):
                         download_stream(video_stream["url"], local, proxies)
                         size = os.path.getsize(local)
                         safe_title = sanitize_filename(title) if title else video_id
-                        key = f"youtube/{channel_handle}/{safe_title}_{video_id}.{ext}"
+                        key = f"youtube/{safe_channel}/{safe_title}_{video_id}.{ext}"
                         s3.upload_file(local, S3_BUCKET, key)
                         uploaded.append((key, size, "video", video_stream.get("mime", "video/mp4")))
                     else:
@@ -301,8 +314,8 @@ def process(conn, video_id: str, channel_handle: str):
                         vsize = os.path.getsize(vlocal)
                         asize = os.path.getsize(alocal)
                         safe_title = sanitize_filename(title) if title else video_id
-                        vkey = f"youtube/{channel_handle}/{safe_title}_{video_id}.video.{vext}"
-                        akey = f"youtube/{channel_handle}/{safe_title}_{video_id}.audio.{aext}"
+                        vkey = f"youtube/{safe_channel}/{safe_title}_{video_id}.video.{vext}"
+                        akey = f"youtube/{safe_channel}/{safe_title}_{video_id}.audio.{aext}"
                         s3.upload_file(vlocal, S3_BUCKET, vkey)
                         s3.upload_file(alocal, S3_BUCKET, akey)
                         uploaded.append((vkey, vsize, "video", video_stream.get("mime", "video/mp4")))
