@@ -135,8 +135,12 @@ def pick_streams(results: list):
     return best_v, best_a
 
 
-def download_stream(url: str, dest: str, proxies: dict):
-    with requests.get(url, proxies=proxies, stream=True, timeout=600) as r:
+def download_stream(url: str, dest: str):
+    headers = {
+        "Referer": "https://www.youtube.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
+    with requests.get(url, headers=headers, stream=True, timeout=600) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
@@ -251,7 +255,7 @@ def process(conn, video_id: str, channel_handle: str):
                         ext = video_stream.get("mime", "video/mp4").split("/")[-1]
                         local = os.path.join(tmpdir, f"video.{ext}")
                         log.info(f"[DOWNLOAD] combined stream {video_id}")
-                        download_stream(video_stream["url"], local, proxies)
+                        download_stream(video_stream["url"], local)
                         size = os.path.getsize(local)
                         key = f"{channel_handle}/{video_id}/video.{ext}"
                         s3.upload_file(local, S3_BUCKET, key)
@@ -264,9 +268,9 @@ def process(conn, video_id: str, channel_handle: str):
                         alocal = os.path.join(tmpdir, f"audio.{aext}")
 
                         log.info(f"[DOWNLOAD] video stream {video_id}")
-                        download_stream(video_stream["url"], vlocal, proxies)
+                        download_stream(video_stream["url"], vlocal)
                         log.info(f"[DOWNLOAD] audio stream {video_id}")
-                        download_stream(audio_stream["url"], alocal, proxies)
+                        download_stream(audio_stream["url"], alocal)
 
                         vsize = os.path.getsize(vlocal)
                         asize = os.path.getsize(alocal)
