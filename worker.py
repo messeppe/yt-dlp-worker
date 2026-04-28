@@ -127,6 +127,12 @@ def sanitize_path_segment(s: str) -> str:
     return s[:80] or "unknown"
 
 
+def sanitize_tag(s: str, default: str) -> str:
+    import re
+    t = re.sub(r"[^a-zA-Z0-9]+", "", str(s or "")).lower()
+    return t[:24] or default
+
+
 def infer_stream_ext(stream: dict, default_ext: str) -> str:
     """Infer extension from CDN URL path first, then MIME type, then default."""
     try:
@@ -141,6 +147,16 @@ def infer_stream_ext(stream: dict, default_ext: str) -> str:
         pass
 
     mime = stream.get("mime", "")
+    quality = str(stream.get("quality", "")).lower()
+    has_audio = bool(stream.get("has_audio"))
+    has_video = bool(stream.get("has_video"))
+
+    # RapidAPI often labels audio-only as audio/mp4 while quality hints M4A.
+    if mime.startswith("audio/") and quality in ("m4a", "audio"):
+        return "m4a"
+    if has_audio and not has_video and quality == "m4a":
+        return "m4a"
+
     if "/" in mime:
         ext = mime.split("/")[-1].split(";")[0].strip().lower()
         if ext:
@@ -156,6 +172,12 @@ def format_bytes(num: float) -> str:
             return f"{n:.2f} {u}"
         n /= 1024
     return f"{n:.2f} TB"
+
+
+def render_progress_bar(pct: float, width: int = 20) -> str:
+    p = max(0.0, min(100.0, pct))
+    filled = int((p / 100.0) * width)
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
 def get_streams(video_id: str, proxies: dict):
@@ -209,6 +231,7 @@ def download_stream(url: str, dest: str, proxies: dict = None):
     downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
     total = 0
     stream_name = os.path.basename(dest)
+    next_pct_log = 5.0
 
     for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
         headers = {}
@@ -261,19 +284,25 @@ def download_stream(url: str, dest: str, proxies: dict = None):
                         downloaded += len(chunk)
 
                         now = time.time()
-                        if now - last_log >= 2.0:
+                        if now - last_log >= 15.0:
                             elapsed = max(now - start, 0.001)
                             speed = downloaded / elapsed
                             if total > 0:
                                 pct = min((downloaded / total) * 100, 100.0)
-                                log.info(
-                                    f"[DOWNLOAD-PROGRESS] {stream_name} "
-                                    f"{format_bytes(downloaded)}/{format_bytes(total)} "
-                                    f"({pct:.1f}%) speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
-                                )
+                                # Log only on progress milestones (5%, 10%, ...).
+                                if pct >= next_pct_log:
+                                    bar = render_progress_bar(pct)
+                                    log.info(
+                                        f"[DOWNLOAD] {stream_name} {bar} {pct:.1f}% "
+                                        f"{format_bytes(downloaded)}/{format_bytes(total)} "
+                                        f"speed={format_bytes(speed)}/s elapsed={elapsed:.0f}s"
+                                    )
+                                    while next_pct_log <= pct:
+                                        next_pct_log += 5.0
                             else:
+                                # Unknown total size: print sparse heartbeat.
                                 log.info(
-                                    f"[DOWNLOAD-PROGRESS] {stream_name} "
+                                    f"[DOWNLOAD] {stream_name} "
                                     f"{format_bytes(downloaded)} speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
                                 )
                             last_log = now
@@ -456,8 +485,14 @@ def process(conn, video_id: str, channel_handle: str):
                         vsize = os.path.getsize(vlocal)
                         asize = os.path.getsize(alocal)
                         safe_title = sanitize_filename(title) if title else video_id
-                        vkey = f"youtube/{safe_channel}/{safe_title}_{video_id}.video.{vext}"
-                        akey = f"youtube/{safe_channel}/{safe_title}_{video_id}.audio.{aext}"
+                        vkey = f"youtube/{safe_channel}/{safe_title}_{video_id}.{vext}"
+                        akey = f"youtube/{safe_channel}/{safe_title}_{video_id}.{aext}"
+                        if vkey == akey:
+                            # Rare fallback: avoid overwrite without using "audio"/"video" labels.
+                            vtag = sanitize_tag(video_stream.get("quality") or video_stream.get("itag"), "v")
+                            atag = sanitize_tag(audio_stream.get("quality") or audio_stream.get("itag"), "a")
+                            vkey = f"youtube/{safe_channel}/{safe_title}_{video_id}_{vtag}.{vext}"
+                            akey = f"youtube/{safe_channel}/{safe_title}_{video_id}_{atag}.{aext}"
                         s3.upload_file(vlocal, S3_BUCKET, vkey)
                         s3.upload_file(alocal, S3_BUCKET, akey)
                         uploaded.append((vkey, vsize, "video", video_stream.get("mime", "video/mp4")))
