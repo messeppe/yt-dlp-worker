@@ -1,13 +1,21 @@
 FROM python:3.11-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg nodejs npm git \
     && rm -rf /var/lib/apt/lists/*
+
+# Build bgutil POT server from source
+RUN git clone --depth=1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
+    && cd /bgutil \
+    && npm ci \
+    && npm run build
 
 COPY requirements_ytdlp.txt .
 RUN pip install --no-cache-dir -r requirements_ytdlp.txt
 
 WORKDIR /app
 COPY worker_ytdlp.py .
+COPY start.sh .
+RUN chmod +x start.sh
 
-CMD ["python", "-u", "worker_ytdlp.py"]
+CMD ["./start.sh"]

@@ -20,7 +20,6 @@ MAX_ATTEMPTS  = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "3"))
 MAX_HEIGHT    = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
 YT_PROXY      = os.environ.get("YT_PROXY", "")        # optional, leave empty for direct
 YT_COOKIES    = os.environ.get("YT_COOKIES_FILE", "")  # optional path to Netscape cookies.txt
-YT_CACHE_DIR  = os.environ.get("YT_CACHE_DIR", "/app/.cache/yt-dlp")  # for OAuth2 token persistence
 
 FORMAT_SPEC = (
     f"bestvideo[height<={MAX_HEIGHT}][vcodec^=avc1]+bestaudio[ext=m4a]"
@@ -172,7 +171,6 @@ def process(conn, video_id: str, channel_handle: str):
             with tempfile.TemporaryDirectory() as tmpdir:
                 outtmpl = os.path.join(tmpdir, "%(title)s_%(id)s.%(ext)s")
 
-                os.makedirs(YT_CACHE_DIR, exist_ok=True)
                 ydl_opts = {
                     "format": FORMAT_SPEC,
                     "outtmpl": outtmpl,
@@ -184,9 +182,6 @@ def process(conn, video_id: str, channel_handle: str):
                     "fragment_retries": 5,
                     "concurrent_fragment_downloads": 4,
                     "keepvideo": True,
-                    "username": "oauth2",
-                    "password": "",
-                    "cachedir": YT_CACHE_DIR,
                 }
                 if YT_PROXY:
                     ydl_opts["proxy"] = YT_PROXY
