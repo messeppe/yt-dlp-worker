@@ -4,7 +4,7 @@ import threading
 import time
 import logging
 import random
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import requests
 import boto3
@@ -20,10 +20,14 @@ DB_URL         = os.environ["SUPABASE_DB_URL"]
 RAPIDAPI_KEY   = os.environ["RAPIDAPI_KEY"]
 RAPIDAPI_HOST  = os.environ["RAPIDAPI_HOST"]
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
-PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
+PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "4"))
 MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
 STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "8"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
+MAX_VIDEO_QUALITY = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
+
+# itags for H.264 (AVC) DASH video streams: 144p→2160p
+H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -192,6 +196,8 @@ def get_streams(video_id: str, proxies: dict):
     )
     resp.raise_for_status()
     data = resp.json()
+    if "results" not in data:
+        log.warning(f"[API-WARN] {video_id}: no 'results' key in response — keys={list(data.keys())}")
     return data.get("title", ""), data.get("results", [])
 
 
@@ -199,7 +205,7 @@ def pick_streams(results: list):
     """Return (combined_stream, None) or (video_stream, audio_stream)."""
     def has_v(r):
         return r.get("has_video") or r.get("mime", "").startswith("video/")
-    
+
     def has_a(r):
         return r.get("has_audio")
 
@@ -210,17 +216,31 @@ def pick_streams(results: list):
         except ValueError:
             return 0
 
+    def get_itag(r):
+        try:
+            qs = parse_qs(urlparse(r.get("url", "")).query)
+            return int(qs.get("itag", [0])[0])
+        except Exception:
+            return 0
+
+    def best_video(streams):
+        """Highest quality ≤ MAX_VIDEO_QUALITY, prefer H.264. Falls back to lowest above cap."""
+        capped = [r for r in streams if v_quality(r) <= MAX_VIDEO_QUALITY]
+        pool = capped if capped else sorted(streams, key=v_quality)[:1]
+        h264 = [r for r in pool if get_itag(r) in H264_VIDEO_ITAGS]
+        candidates = h264 if h264 else pool
+        return sorted(candidates, key=v_quality, reverse=True)[0]
+
     combined = [r for r in results if has_v(r) and has_a(r)]
     if combined:
-        best = sorted(combined, key=v_quality, reverse=True)[0]
-        return best, None
+        return best_video(combined), None
 
     videos = [r for r in results if has_v(r) and not has_a(r)]
     audios = [r for r in results if has_a(r) and not has_v(r)]
     if not videos or not audios:
         return None, None
 
-    best_v = sorted(videos, key=v_quality, reverse=True)[0]
+    best_v = best_video(videos)
     best_a = sorted(audios, key=lambda r: r.get("quality", ""), reverse=True)[0]
     return best_v, best_a
 
@@ -415,7 +435,7 @@ def process(conn, video_id: str, channel_handle: str):
                 break
             proxy_n = random.choice(available)
             used_proxies.add(proxy_n)
-            proxies = make_numbered_proxy(proxy_n)
+            proxies = make_sticky_proxy(proxy_n)
 
             log.info(f"[ATTEMPT {attempt}/{max_attempts}] {video_id} proxy={proxy_n}")
 
@@ -446,7 +466,7 @@ def process(conn, video_id: str, channel_handle: str):
 
             if not results:
                 last_error = "RapidAPI returned empty results"
-                log.warning(f"[RETRY] {video_id}: {last_error}")
+                log.warning(f"[RETRY] {video_id}: {last_error} title={title!r}")
                 continue
 
             video_stream, audio_stream = pick_streams(results)
