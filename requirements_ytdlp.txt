@@ -1,4 +1,4 @@
 yt-dlp
 boto3
 psycopg2-binary
-bgutil-ytdlp-pot-provider
+yt-dlp-plugin-youtube-oauth2
