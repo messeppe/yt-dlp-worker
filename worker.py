@@ -146,6 +146,16 @@ def infer_stream_ext(stream: dict, default_ext: str) -> str:
     return default_ext
 
 
+def format_bytes(num: float) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    n = float(num)
+    for u in units:
+        if n < 1024 or u == units[-1]:
+            return f"{n:.2f} {u}"
+        n /= 1024
+    return f"{n:.2f} TB"
+
+
 def get_streams(video_id: str, proxies: dict):
     """Returns (title, results) from RapidAPI download endpoint."""
     url = f"https://{RAPIDAPI_HOST}/download.php"
@@ -192,11 +202,58 @@ def pick_streams(results: list):
 
 
 def download_stream(url: str, dest: str, proxies: dict = None):
+    start = time.time()
+    last_log = start
+    downloaded = 0
+
     with requests.get(url, proxies=proxies, stream=True, timeout=600) as r:
         r.raise_for_status()
+        total = int(r.headers.get("Content-Length", "0") or "0")
+        if total > 0:
+            log.info(f"[DOWNLOAD-START] {os.path.basename(dest)} total={format_bytes(total)}")
+        else:
+            log.info(f"[DOWNLOAD-START] {os.path.basename(dest)} total=unknown")
+
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
                 f.write(chunk)
+                downloaded += len(chunk)
+
+                now = time.time()
+                if now - last_log >= 2.0:
+                    elapsed = max(now - start, 0.001)
+                    speed = downloaded / elapsed
+                    if total > 0:
+                        pct = (downloaded / total) * 100
+                        log.info(
+                            f"[DOWNLOAD-PROGRESS] {os.path.basename(dest)} "
+                            f"{format_bytes(downloaded)}/{format_bytes(total)} "
+                            f"({pct:.1f}%) speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+                        )
+                    else:
+                        log.info(
+                            f"[DOWNLOAD-PROGRESS] {os.path.basename(dest)} "
+                            f"{format_bytes(downloaded)} speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+                        )
+                    last_log = now
+
+    elapsed = max(time.time() - start, 0.001)
+    speed = downloaded / elapsed
+    if downloaded == 0 and os.path.exists(dest):
+        downloaded = os.path.getsize(dest)
+    if total > 0:
+        log.info(
+            f"[DOWNLOAD-DONE] {os.path.basename(dest)} "
+            f"{format_bytes(downloaded)}/{format_bytes(total)} (100.0%) "
+            f"avg_speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+        )
+    else:
+        log.info(
+            f"[DOWNLOAD-DONE] {os.path.basename(dest)} "
+            f"{format_bytes(downloaded)} avg_speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+        )
 
 
 def mark_complete(conn, video_id: str, files: list):
