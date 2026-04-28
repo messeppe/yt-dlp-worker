@@ -22,6 +22,8 @@ RAPIDAPI_HOST  = os.environ["RAPIDAPI_HOST"]
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
 PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
+STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "8"))
+STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -204,54 +206,115 @@ def pick_streams(results: list):
 def download_stream(url: str, dest: str, proxies: dict = None):
     start = time.time()
     last_log = start
-    downloaded = 0
+    downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
+    total = 0
+    stream_name = os.path.basename(dest)
 
-    with requests.get(url, proxies=proxies, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length", "0") or "0")
-        if total > 0:
-            log.info(f"[DOWNLOAD-START] {os.path.basename(dest)} total={format_bytes(total)}")
-        else:
-            log.info(f"[DOWNLOAD-START] {os.path.basename(dest)} total=unknown")
+    for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
+        headers = {}
+        if downloaded > 0:
+            headers["Range"] = f"bytes={downloaded}-"
 
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
+        try:
+            timeout = (15, STREAM_READ_TIMEOUT)
+            with requests.get(url, proxies=proxies, headers=headers, stream=True, timeout=timeout) as r:
+                r.raise_for_status()
 
-                now = time.time()
-                if now - last_log >= 2.0:
-                    elapsed = max(now - start, 0.001)
-                    speed = downloaded / elapsed
+                # If server doesn't honor range and returns full content, restart cleanly.
+                if downloaded > 0 and r.status_code == 200:
+                    log.warning(
+                        f"[DOWNLOAD-RESUME-RESET] {stream_name} server ignored Range; restarting from 0"
+                    )
+                    downloaded = 0
+                    if os.path.exists(dest):
+                        os.remove(dest)
+
+                content_length = int(r.headers.get("Content-Length", "0") or "0")
+                if content_length > 0:
+                    total = downloaded + content_length if r.status_code == 206 else content_length
+                else:
+                    total = total or 0
+
+                if stream_attempt == 1:
                     if total > 0:
-                        pct = (downloaded / total) * 100
+                        log.info(f"[DOWNLOAD-START] {stream_name} total={format_bytes(total)}")
+                    else:
+                        log.info(f"[DOWNLOAD-START] {stream_name} total=unknown")
+                else:
+                    if total > 0:
                         log.info(
-                            f"[DOWNLOAD-PROGRESS] {os.path.basename(dest)} "
-                            f"{format_bytes(downloaded)}/{format_bytes(total)} "
-                            f"({pct:.1f}%) speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+                            f"[DOWNLOAD-RESUME] {stream_name} attempt={stream_attempt}/{STREAM_MAX_RETRIES} "
+                            f"from={format_bytes(downloaded)} total={format_bytes(total)}"
                         )
                     else:
                         log.info(
-                            f"[DOWNLOAD-PROGRESS] {os.path.basename(dest)} "
-                            f"{format_bytes(downloaded)} speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+                            f"[DOWNLOAD-RESUME] {stream_name} attempt={stream_attempt}/{STREAM_MAX_RETRIES} "
+                            f"from={format_bytes(downloaded)} total=unknown"
                         )
-                    last_log = now
+
+                mode = "ab" if downloaded > 0 else "wb"
+                with open(dest, mode) as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        now = time.time()
+                        if now - last_log >= 2.0:
+                            elapsed = max(now - start, 0.001)
+                            speed = downloaded / elapsed
+                            if total > 0:
+                                pct = min((downloaded / total) * 100, 100.0)
+                                log.info(
+                                    f"[DOWNLOAD-PROGRESS] {stream_name} "
+                                    f"{format_bytes(downloaded)}/{format_bytes(total)} "
+                                    f"({pct:.1f}%) speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+                                )
+                            else:
+                                log.info(
+                                    f"[DOWNLOAD-PROGRESS] {stream_name} "
+                                    f"{format_bytes(downloaded)} speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
+                                )
+                            last_log = now
+
+                # Finished this request successfully.
+                if total == 0 or downloaded >= total:
+                    break
+                log.warning(
+                    f"[DOWNLOAD-RETRY] {stream_name} ended early "
+                    f"{format_bytes(downloaded)}/{format_bytes(total)}; retrying"
+                )
+
+        except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout) as e:
+            if stream_attempt == STREAM_MAX_RETRIES:
+                raise
+            sleep_s = min(2 ** stream_attempt, 15)
+            log.warning(
+                f"[DOWNLOAD-RETRY] {stream_name} attempt={stream_attempt}/{STREAM_MAX_RETRIES} "
+                f"at={format_bytes(downloaded)} error={e} backoff={sleep_s}s"
+            )
+            time.sleep(sleep_s)
+            continue
 
     elapsed = max(time.time() - start, 0.001)
     speed = downloaded / elapsed
-    if downloaded == 0 and os.path.exists(dest):
-        downloaded = os.path.getsize(dest)
+    if total > 0 and downloaded < total:
+        raise RuntimeError(
+            f"incomplete download after retries: got {downloaded} bytes, expected {total}"
+        )
+
     if total > 0:
         log.info(
-            f"[DOWNLOAD-DONE] {os.path.basename(dest)} "
+            f"[DOWNLOAD-DONE] {stream_name} "
             f"{format_bytes(downloaded)}/{format_bytes(total)} (100.0%) "
             f"avg_speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
         )
     else:
         log.info(
-            f"[DOWNLOAD-DONE] {os.path.basename(dest)} "
+            f"[DOWNLOAD-DONE] {stream_name} "
             f"{format_bytes(downloaded)} avg_speed={format_bytes(speed)}/s elapsed={elapsed:.1f}s"
         )
 
