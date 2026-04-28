@@ -18,7 +18,8 @@ DB_URL        = os.environ["SUPABASE_DB_URL"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_ATTEMPTS  = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "3"))
 MAX_HEIGHT    = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
-YT_PROXY      = os.environ.get("YT_PROXY", "")  # optional, leave empty for direct
+YT_PROXY      = os.environ.get("YT_PROXY", "")        # optional, leave empty for direct
+YT_COOKIES    = os.environ.get("YT_COOKIES_FILE", "")  # optional path to Netscape cookies.txt
 
 FORMAT_SPEC = (
     f"bestvideo[height<={MAX_HEIGHT}][vcodec^=avc1]+bestaudio[ext=m4a]"
@@ -184,6 +185,8 @@ def process(conn, video_id: str, channel_handle: str):
                 }
                 if YT_PROXY:
                     ydl_opts["proxy"] = YT_PROXY
+                if YT_COOKIES and os.path.exists(YT_COOKIES):
+                    ydl_opts["cookiefile"] = YT_COOKIES
 
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
