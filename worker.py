@@ -3,6 +3,7 @@ import signal
 import threading
 import time
 import logging
+import random
 
 import requests
 import boto3
@@ -18,6 +19,8 @@ DB_URL         = os.environ["SUPABASE_DB_URL"]
 RAPIDAPI_KEY   = os.environ["RAPIDAPI_KEY"]
 RAPIDAPI_HOST  = os.environ["RAPIDAPI_HOST"]
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
+PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
+MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +40,17 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def make_sticky_proxy(n: int) -> dict:
-    url = PROXY_URL.replace("-rotate", f"-{n}", 1)
+    url = PROXY_URL.replace("-rotate", f"-DE-{n}", 1)
+    return {"http": url, "https": url}
+
+
+def make_numbered_proxy(n: int) -> dict:
+    # Supports Webshare numbered usernames (e.g. rcqplwgm-1 ... rcqplwgm-100).
+    if "-rotate" in PROXY_URL:
+        url = PROXY_URL.replace("-rotate", f"-{n}", 1)
+    else:
+        # Fallback for manually configured non-rotate usernames.
+        url = PROXY_URL
     return {"http": url, "https": url}
 
 
@@ -91,7 +104,16 @@ def renew_lock(conn, video_id: str, stop_event: threading.Event):
             log.warning(f"[HEARTBEAT] {video_id}: {e}")
 
 
-def get_streams(video_id: str, proxies: dict) -> list:
+def sanitize_filename(s: str) -> str:
+    """Strip unsafe chars and limit length for S3 keys."""
+    import re
+    s = re.sub(r'[\\/*?:"<>|]', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s[:120]
+
+
+def get_streams(video_id: str, proxies: dict):
+    """Returns (title, results) from RapidAPI download endpoint."""
     url = f"https://{RAPIDAPI_HOST}/download.php"
     resp = requests.get(
         url,
@@ -102,7 +124,7 @@ def get_streams(video_id: str, proxies: dict) -> list:
     )
     resp.raise_for_status()
     data = resp.json()
-    return data.get("results", [])
+    return data.get("title", ""), data.get("results", [])
 
 
 def pick_streams(results: list):
@@ -135,12 +157,8 @@ def pick_streams(results: list):
     return best_v, best_a
 
 
-def download_stream(url: str, dest: str):
-    headers = {
-        "Referer": "https://www.youtube.com/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    }
-    with requests.get(url, headers=headers, stream=True, timeout=600) as r:
+def download_stream(url: str, dest: str, proxies: dict = None):
+    with requests.get(url, proxies=proxies, stream=True, timeout=600) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
@@ -203,18 +221,25 @@ def process(conn, video_id: str, channel_handle: str):
     heartbeat.start()
 
     try:
-        for attempt in range(1, 6):
-            # Pick a proxy not used yet
-            proxy_n = next((n for n in range(1, 101) if n not in used_proxies), None)
-            if proxy_n is None:
-                break
-            used_proxies.add(proxy_n)
-            proxies = make_sticky_proxy(proxy_n)
+        pool_size = max(PROXY_POOL_SIZE, 1)
+        max_attempts = max(1, min(MAX_ATTEMPTS_PER_VIDEO, pool_size))
 
-            log.info(f"[ATTEMPT {attempt}/5] {video_id} proxy={proxy_n}")
+        for attempt in range(1, max_attempts + 1):
+            # Pick a random proxy not used yet for this video.
+            available = [n for n in range(1, pool_size + 1) if n not in used_proxies]
+            if not available:
+                break
+            proxy_n = random.choice(available)
+            used_proxies.add(proxy_n)
+            proxies = make_numbered_proxy(proxy_n)
+
+            log.info(f"[ATTEMPT {attempt}/{max_attempts}] {video_id} proxy={proxy_n}")
+
+            # Rate-limit: ensure max 2 req/s to RapidAPI
+            time.sleep(0.5)
 
             try:
-                results = get_streams(video_id, proxies)
+                title, results = get_streams(video_id, proxies)
             except requests.HTTPError as e:
                 status = e.response.status_code if e.response is not None else 0
                 if status in (400, 404):
@@ -255,9 +280,10 @@ def process(conn, video_id: str, channel_handle: str):
                         ext = video_stream.get("mime", "video/mp4").split("/")[-1]
                         local = os.path.join(tmpdir, f"video.{ext}")
                         log.info(f"[DOWNLOAD] combined stream {video_id}")
-                        download_stream(video_stream["url"], local)
+                        download_stream(video_stream["url"], local, proxies)
                         size = os.path.getsize(local)
-                        key = f"{channel_handle}/{video_id}/video.{ext}"
+                        safe_title = sanitize_filename(title) if title else video_id
+                        key = f"youtube/{channel_handle}/{safe_title}_{video_id}.{ext}"
                         s3.upload_file(local, S3_BUCKET, key)
                         uploaded.append((key, size, "video", video_stream.get("mime", "video/mp4")))
                     else:
@@ -268,14 +294,15 @@ def process(conn, video_id: str, channel_handle: str):
                         alocal = os.path.join(tmpdir, f"audio.{aext}")
 
                         log.info(f"[DOWNLOAD] video stream {video_id}")
-                        download_stream(video_stream["url"], vlocal)
+                        download_stream(video_stream["url"], vlocal, proxies)
                         log.info(f"[DOWNLOAD] audio stream {video_id}")
-                        download_stream(audio_stream["url"], alocal)
+                        download_stream(audio_stream["url"], alocal, proxies)
 
                         vsize = os.path.getsize(vlocal)
                         asize = os.path.getsize(alocal)
-                        vkey = f"{channel_handle}/{video_id}/video.{vext}"
-                        akey = f"{channel_handle}/{video_id}/audio.{aext}"
+                        safe_title = sanitize_filename(title) if title else video_id
+                        vkey = f"youtube/{channel_handle}/{safe_title}_{video_id}.video.{vext}"
+                        akey = f"youtube/{channel_handle}/{safe_title}_{video_id}.audio.{aext}"
                         s3.upload_file(vlocal, S3_BUCKET, vkey)
                         s3.upload_file(alocal, S3_BUCKET, akey)
                         uploaded.append((vkey, vsize, "video", video_stream.get("mime", "video/mp4")))
