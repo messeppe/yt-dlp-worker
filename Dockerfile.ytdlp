@@ -7,7 +7,7 @@ RUN apt-get update \
 # Build bgutil POT server from source
 RUN git clone --depth=1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
     && cd /bgutil \
-    && npm ci \
+    && npm install \
     && npm run build
 
 COPY requirements_ytdlp.txt .
