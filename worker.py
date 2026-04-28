@@ -4,6 +4,7 @@ import threading
 import time
 import logging
 import random
+from urllib.parse import urlparse
 
 import requests
 import boto3
@@ -122,6 +123,27 @@ def sanitize_path_segment(s: str) -> str:
     s = re.sub(r'[\\/*?:"<>|]', '', s or '')
     s = re.sub(r'\s+', '_', s).strip("._ ")
     return s[:80] or "unknown"
+
+
+def infer_stream_ext(stream: dict, default_ext: str) -> str:
+    """Infer extension from CDN URL path first, then MIME type, then default."""
+    try:
+        url = stream.get("url", "")
+        path = urlparse(url).path
+        tail = path.rsplit("/", 1)[-1]
+        if "." in tail:
+            ext = tail.rsplit(".", 1)[-1].lower()
+            if ext and 1 <= len(ext) <= 8 and ext.isalnum():
+                return ext
+    except Exception:
+        pass
+
+    mime = stream.get("mime", "")
+    if "/" in mime:
+        ext = mime.split("/")[-1].split(";")[0].strip().lower()
+        if ext:
+            return ext
+    return default_ext
 
 
 def get_streams(video_id: str, proxies: dict):
@@ -290,7 +312,7 @@ def process(conn, video_id: str, channel_handle: str):
 
                     if audio_stream is None:
                         # Combined stream
-                        ext = video_stream.get("mime", "video/mp4").split("/")[-1]
+                        ext = infer_stream_ext(video_stream, "mp4")
                         local = os.path.join(tmpdir, f"video.{ext}")
                         log.info(f"[DOWNLOAD] combined stream {video_id}")
                         download_stream(video_stream["url"], local, proxies)
@@ -301,8 +323,8 @@ def process(conn, video_id: str, channel_handle: str):
                         uploaded.append((key, size, "video", video_stream.get("mime", "video/mp4")))
                     else:
                         # Separate video + audio
-                        vext = video_stream.get("mime", "video/mp4").split("/")[-1]
-                        aext = audio_stream.get("mime", "audio/m4a").split("/")[-1]
+                        vext = infer_stream_ext(video_stream, "mp4")
+                        aext = infer_stream_ext(audio_stream, "m4a")
                         vlocal = os.path.join(tmpdir, f"video.{vext}")
                         alocal = os.path.join(tmpdir, f"audio.{aext}")
 
