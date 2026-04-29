@@ -16,7 +16,7 @@ log "Starting $WORKER_COUNT worker processes..."
 pids=()
 for i in $(seq 1 "$WORKER_COUNT"); do
     log "Spawning worker-$i"
-    python -u /app/worker.py &
+    WORKER_ID="worker-$i" python -u /app/worker.py &
     pids+=($!)
 done
 

@@ -29,9 +29,11 @@ MAX_VIDEO_QUALITY = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
 # itags for H.264 (AVC) DASH video streams: 144p→2160p
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
+WORKER_ID = os.environ.get("WORKER_ID", "main")
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
+    format=f"%(asctime)s [{WORKER_ID}] %(levelname)s %(message)s",
 )
 log = logging.getLogger(__name__)
 
