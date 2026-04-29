@@ -197,7 +197,10 @@ def get_streams(video_id: str, proxies: dict):
     resp.raise_for_status()
     data = resp.json()
     if "results" not in data:
-        log.warning(f"[API-WARN] {video_id}: no 'results' key in response — keys={list(data.keys())}")
+        log.warning(
+            f"[API-WARN] {video_id}: no 'results' key — "
+            f"status={data.get('status_code')} message={data.get('message')!r}"
+        )
     return data.get("title", ""), data.get("results", [])
 
 
