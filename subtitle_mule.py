@@ -45,7 +45,7 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 
 def make_sticky_proxy(n: int) -> dict:
     url = (
-        PROXY_URL.replace("-rotate", f"-DE-{n}", 1)
+        PROXY_URL.replace("-rotate", f"-{n}", 1)
         if "-rotate" in PROXY_URL
         else PROXY_URL
     )
