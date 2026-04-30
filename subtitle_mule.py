@@ -17,8 +17,9 @@ S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 DB_URL = os.environ["SUPABASE_DB_URL"]
 PROXY_URL = os.environ["PROXY_URL"]
-PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "4"))
+PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
 SUBTITLE_LANGS = [
     l.strip() for l in os.environ.get("SUBTITLE_LANGS", "id,ar").split(",") if l.strip()
 ]
@@ -181,23 +182,71 @@ def vtt_url(url: str) -> str:
 
 
 def download_vtt(url: str, video_id: str = "", lang: str = "") -> str:
-    proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
-    proxies = make_sticky_proxy(proxy_idx)
-    log.info(f"[DOWNLOAD] {video_id} lang={lang} proxy={proxy_idx}")
-    start = time.time()
-    resp = requests.get(url, proxies=proxies, timeout=(10, 30))
-    resp.raise_for_status()
-    content = resp.text
-    elapsed = time.time() - start
-    size = len(content.encode("utf-8"))
-    log.info(
-        f"[DOWNLOAD-DONE] {video_id} lang={lang} {size} bytes elapsed={elapsed:.1f}s"
+    """Download VTT subtitle with retry, proxy rotation, and exponential backoff.
+
+    Matches the media mule's download_stream retry strategy:
+    - Retries on 429 (rate-limit) and transient connection errors
+    - Swaps to a fresh random proxy on each attempt
+    - Exponential backoff: min(2**attempt, 15) seconds
+    - Gives up after MAX_RETRIES attempts
+    """
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+        proxies = make_sticky_proxy(proxy_idx)
+        log.info(
+            f"[DOWNLOAD] {video_id} lang={lang} proxy={proxy_idx} attempt={attempt}/{MAX_RETRIES}"
+        )
+        try:
+            start = time.time()
+            resp = requests.get(url, proxies=proxies, timeout=(10, 30))
+            resp.raise_for_status()
+            content = resp.text
+            elapsed = time.time() - start
+            size = len(content.encode("utf-8"))
+            log.info(
+                f"[DOWNLOAD-DONE] {video_id} lang={lang} {size} bytes elapsed={elapsed:.1f}s"
+            )
+            if not content or not content.strip():
+                raise ValueError("VTT response was empty")
+            if not content.lstrip().startswith("WEBVTT"):
+                raise ValueError(
+                    f"response is not WebVTT (starts with: {content[:80]!r})"
+                )
+            return content
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            last_error = e
+            if status == 429:
+                sleep_s = min(2**attempt, 15)
+                log.warning(
+                    f"[DOWNLOAD-RETRY] {video_id} lang={lang} proxy={proxy_idx} 429 rate-limited — backing off {sleep_s}s (attempt {attempt}/{MAX_RETRIES})"
+                )
+                time.sleep(sleep_s)
+                continue
+            elif status >= 500:
+                sleep_s = min(2**attempt, 15)
+                log.warning(
+                    f"[DOWNLOAD-RETRY] {video_id} lang={lang} proxy={proxy_idx} server error {status} — backing off {sleep_s}s (attempt {attempt}/{MAX_RETRIES})"
+                )
+                time.sleep(sleep_s)
+                continue
+            else:
+                log.warning(
+                    f"[DOWNLOAD-FAIL] {video_id} lang={lang} proxy={proxy_idx} HTTP {status}: {e}"
+                )
+                raise
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_error = e
+            sleep_s = min(2**attempt, 15)
+            log.warning(
+                f"[DOWNLOAD-RETRY] {video_id} lang={lang} proxy={proxy_idx} connection error: {e} — backing off {sleep_s}s (attempt {attempt}/{MAX_RETRIES})"
+            )
+            time.sleep(sleep_s)
+            continue
+    raise ConnectionError(
+        f"failed to download VTT after {MAX_RETRIES} attempts: {last_error}"
     )
-    if not content or not content.strip():
-        raise ValueError("VTT response was empty")
-    if not content.lstrip().startswith("WEBVTT"):
-        raise ValueError(f"response is not WebVTT (starts with: {content[:80]!r})")
-    return content
 
 
 def process(conn, video_id, payload, channel_handle, title):
