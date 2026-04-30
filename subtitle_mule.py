@@ -6,6 +6,7 @@ import time
 import logging
 import tempfile
 
+import random
 import requests
 import boto3
 import psycopg2
@@ -15,6 +16,8 @@ S3_BUCKET     = os.environ["S3_BUCKET"]
 S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 DB_URL        = os.environ["SUPABASE_DB_URL"]
+PROXY_URL     = os.environ["PROXY_URL"]
+PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "4"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 SUBTITLE_LANGS = [l.strip() for l in os.environ.get("SUBTITLE_LANGS", "id,ar").split(",") if l.strip()]
 
@@ -28,6 +31,10 @@ def handle_sigterm(signum, frame):
     _shutdown.set()
 
 signal.signal(signal.SIGTERM, handle_sigterm)
+
+def make_sticky_proxy(n: int) -> dict:
+    url = PROXY_URL.replace("-rotate", f"-DE-{n}", 1) if "-rotate" in PROXY_URL else PROXY_URL
+    return {"http": url, "https": url}
 
 def sanitize_filename(s: str) -> str:
     s = re.sub(r'[\\/*?:"<>|]', '', s or '')
@@ -129,7 +136,8 @@ def vtt_url(url: str) -> str:
     return re.sub(r'\bfmt=json3\b', 'fmt=vtt3', url)
 
 def download_vtt(url: str) -> str:
-    resp = requests.get(url, timeout=(10, 30))
+    proxies = make_sticky_proxy(random.randint(1, max(PROXY_POOL_SIZE, 1)))
+    resp = requests.get(url, proxies=proxies, timeout=(10, 30))
     resp.raise_for_status()
     content = resp.text
     if not content or not content.strip():
