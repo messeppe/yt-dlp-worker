@@ -13,11 +13,6 @@ COPY scout.py .
 COPY start_workers.sh .
 RUN chmod +x start_workers.sh
 
-# --- REVERSIBLE: Single worker vs Multi-worker ---
-# Uncomment ONE of the two CMD lines below.
-
-# Single worker (original):
-CMD ["python", "-u", "worker.py"]
-
-# Multi-worker (5 concurrent processes):
-# CMD ["./start_workers.sh"]
+# --- Deployment Command ---
+# Using start_workers.sh to run both Scout and Mule in the same container.
+CMD ["./start_workers.sh"]
