@@ -21,8 +21,13 @@ PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "4"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 SUBTITLE_LANGS = [l.strip() for l in os.environ.get("SUBTITLE_LANGS", "id,ar").split(",") if l.strip()]
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("subtitle-mule")
+_WORKER_ID = os.environ.get("WORKER_ID", "subtitle-mule")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-5s | %(name)-16s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(_WORKER_ID)
 
 _shutdown = threading.Event()
 

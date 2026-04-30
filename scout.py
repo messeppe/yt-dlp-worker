@@ -17,11 +17,13 @@ MAX_VIDEO_QUALITY = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
+_WORKER_ID = os.environ.get("WORKER_ID", "scout")
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
+    format="%(asctime)s | %(levelname)-5s | %(name)-16s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("scout")
+log = logging.getLogger(_WORKER_ID)
 
 _shutdown = threading.Event()
 
