@@ -135,11 +135,17 @@ def vtt_url(url: str) -> str:
     """Replace fmt=json3 with fmt=vtt3 to get WebVTT directly."""
     return re.sub(r'\bfmt=json3\b', 'fmt=vtt3', url)
 
-def download_vtt(url: str) -> str:
-    proxies = make_sticky_proxy(random.randint(1, max(PROXY_POOL_SIZE, 1)))
+def download_vtt(url: str, lang: str = "") -> str:
+    proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+    proxies = make_sticky_proxy(proxy_idx)
+    log.info(f"[DOWNLOAD] lang={lang} proxy={proxy_idx}")
+    start = time.time()
     resp = requests.get(url, proxies=proxies, timeout=(10, 30))
     resp.raise_for_status()
     content = resp.text
+    elapsed = time.time() - start
+    size = len(content.encode("utf-8"))
+    log.info(f"[DOWNLOAD-DONE] lang={lang} {size} bytes elapsed={elapsed:.1f}s")
     if not content or not content.strip():
         raise ValueError("VTT response was empty")
     if not content.lstrip().startswith("WEBVTT"):
@@ -169,7 +175,7 @@ def process(conn, video_id, payload, channel_handle, title):
             for track in tracks:
                 lang = track["language_code"]
                 try:
-                    content = download_vtt(vtt_url(track["url"]))
+                    content = download_vtt(vtt_url(track["url"]), lang=lang)
                 except Exception as e:
                     log.warning(f"[SKIP] {video_id} lang={lang}: {e}")
                     continue
