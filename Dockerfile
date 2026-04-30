@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
 COPY worker.py .
+COPY scout.py .
 COPY start_workers.sh .
 RUN chmod +x start_workers.sh
 
@@ -16,7 +17,7 @@ RUN chmod +x start_workers.sh
 # Uncomment ONE of the two CMD lines below.
 
 # Single worker (original):
-# CMD ["python", "-u", "worker.py"]
+CMD ["python", "-u", "worker.py"]
 
 # Multi-worker (5 concurrent processes):
-CMD ["./start_workers.sh"]
+# CMD ["./start_workers.sh"]
