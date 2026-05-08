@@ -378,7 +378,7 @@ def main():
     )
     while True:
         try:
-            conn = psycopg2.connect(DB_URL)
+            conn = psycopg2.connect(DB_URL, options="-c timezone=Asia/Jakarta")
             break
         except Exception as e:
             log.error(f"DB connect failed: {e} — retrying in 10s")
@@ -396,7 +396,7 @@ def main():
                     pass
                 time.sleep(5)
                 try:
-                    conn = psycopg2.connect(DB_URL)
+                    conn = psycopg2.connect(DB_URL, options="-c timezone=Asia/Jakarta")
                 except Exception:
                     pass
                 continue
