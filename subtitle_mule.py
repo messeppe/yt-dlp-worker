@@ -299,7 +299,7 @@ def process(conn, video_id, payload, channel_handle, title):
 
         tracks = extract_target_tracks(payload)
         if not tracks:
-            raise ValueError(f"no tracks for langs {SUBTITLE_LANGS}")
+            raise ValueError("no native ASR track found")
 
         log.info(
             f"[START] {video_id} — {len(tracks)} track(s): {[t['language_code'] for t in tracks]}"
