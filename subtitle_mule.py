@@ -303,6 +303,11 @@ def process(conn, video_id, payload, channel_handle, title):
         if not payload:
             raise ValueError("subtitle_raw_payload is null")
 
+        # Normalize: old payloads stored full API response {status, results{...}},
+        # new ones store the results dict directly {subtitle, automated_subtitle}.
+        if "subtitle" not in payload and "automated_subtitle" not in payload:
+            payload = payload.get("results") or payload
+
         tracks = extract_target_tracks(payload)
         if not tracks:
             raise ValueError(f"no tracks for langs {SUBTITLE_LANGS}")
