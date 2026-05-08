@@ -15,8 +15,10 @@ RAPIDAPI_KEY   = os.environ["RAPIDAPI_KEY"]
 RAPIDAPI_HOST  = os.environ["RAPIDAPI_HOST"]
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_VIDEO_QUALITY = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
-LOW_QUOTA_THRESHOLD  = int(os.environ.get("LOW_QUOTA_THRESHOLD", "100"))
-HARD_QUOTA_THRESHOLD = int(os.environ.get("HARD_QUOTA_THRESHOLD", "20"))
+LOW_QUOTA_THRESHOLD    = int(os.environ.get("LOW_QUOTA_THRESHOLD", "100"))
+HARD_QUOTA_THRESHOLD   = int(os.environ.get("HARD_QUOTA_THRESHOLD", "20"))
+CIRCUIT_OPEN_THRESHOLD = int(os.environ.get("CIRCUIT_OPEN_THRESHOLD", "3"))
+CIRCUIT_SLEEP_BASE     = int(os.environ.get("CIRCUIT_SLEEP_BASE", "300"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
@@ -32,6 +34,7 @@ log = logging.getLogger(_WORKER_ID)
 # None = state unknown (no successful call yet or headers absent).
 _quota_remaining: int | None = None
 _quota_reset_at: int = 0  # Unix timestamp when quota window resets
+_consecutive_api_failures: int = 0
 
 _shutdown = threading.Event()
 
@@ -79,6 +82,32 @@ def _quota_sleep_seconds() -> int:
     if _quota_reset_at and _quota_reset_at > int(time.time()):
         return max(_quota_reset_at - int(time.time()), 60)
     return 0  # reset already passed — quota likely refreshed
+
+
+def _circuit_open() -> bool:
+    return _consecutive_api_failures >= CIRCUIT_OPEN_THRESHOLD
+
+
+def _circuit_sleep_seconds() -> int:
+    excess = max(_consecutive_api_failures - CIRCUIT_OPEN_THRESHOLD, 0)
+    return min(CIRCUIT_SLEEP_BASE * (2 ** excess), 3600)
+
+
+def _on_api_success() -> None:
+    global _consecutive_api_failures
+    if _consecutive_api_failures > 0:
+        log.info(f"[CIRCUIT-CLOSE] RapidAPI recovered after {_consecutive_api_failures} consecutive failures")
+    _consecutive_api_failures = 0
+
+
+def _on_api_failure() -> None:
+    global _consecutive_api_failures
+    _consecutive_api_failures += 1
+    if _circuit_open():
+        log.warning(
+            f"[CIRCUIT-OPEN] {_consecutive_api_failures} consecutive RapidAPI failures "
+            f"— halting scout for {_circuit_sleep_seconds()}s"
+        )
 
 
 def persist_quota(conn) -> None:
@@ -359,24 +388,37 @@ def process(conn, video_id: str):
     try:
         title, results = get_streams(video_id)
         persist_quota(conn)
+        _on_api_success()
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         persist_quota(conn)
         if status == 429:
             sleep_s = max(_quota_reset_at - int(time.time()), 3600) if _quota_reset_at else 3600
-            log.warning(f"[429] {video_id}: RapidAPI quota hit — requeuing, sleeping {sleep_s}s")
+            log.warning(f"[429] {video_id}: quota hit — requeuing, sleeping {sleep_s}s")
             requeue(conn, video_id)
             _shutdown.wait(sleep_s)
+            return
+        if status == 407:
+            log.warning(f"[407] {video_id}: proxy auth failure — requeuing, backing off 60s")
+            requeue(conn, video_id)
+            _shutdown.wait(60)
             return
         if status in (500, 502, 503, 504):
-            sleep_s = 60
-            log.warning(f"[5XX] {video_id}: RapidAPI {status} transient — requeuing, backing off {sleep_s}s")
+            _on_api_failure()
+            sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
+            log.warning(f"[5XX] {video_id}: RapidAPI {status} — requeuing, sleeping {sleep_s}s")
             requeue(conn, video_id)
             _shutdown.wait(sleep_s)
             return
-        last_error = f"RapidAPI HTTP {status}"
-        mark_failed(conn, video_id, last_error)
-        log.warning(f"[FAIL] {video_id}: {last_error}", exc_info=True)
+        mark_failed(conn, video_id, f"RapidAPI HTTP {status}")
+        log.warning(f"[FAIL] {video_id}: RapidAPI HTTP {status}", exc_info=True)
+        return
+    except (requests.ConnectionError, requests.Timeout) as e:
+        _on_api_failure()
+        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
+        log.warning(f"[CONN-ERR] {video_id}: {e} — requeuing, sleeping {sleep_s}s")
+        requeue(conn, video_id)
+        _shutdown.wait(sleep_s)
         return
     except Exception as e:
         mark_failed(conn, video_id, str(e))
@@ -419,6 +461,7 @@ def process_subtitle(conn, video_id: str) -> None:
     try:
         payload = get_subtitle_payload(video_id)
         persist_quota(conn)
+        _on_api_success()
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         persist_quota(conn)
@@ -428,13 +471,26 @@ def process_subtitle(conn, video_id: str) -> None:
             requeue_subtitle(conn, video_id)
             _shutdown.wait(sleep_s)
             return
+        if status == 407:
+            log.warning(f"[407] {video_id}: subtitle proxy auth — requeuing, backing off 60s")
+            requeue_subtitle(conn, video_id)
+            _shutdown.wait(60)
+            return
         if status in (500, 502, 503, 504):
-            sleep_s = 60
-            log.warning(f"[5XX] {video_id}: subtitle RapidAPI {status} — requeuing, backing off {sleep_s}s")
+            _on_api_failure()
+            sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
+            log.warning(f"[5XX] {video_id}: subtitle RapidAPI {status} — requeuing, sleeping {sleep_s}s")
             requeue_subtitle(conn, video_id)
             _shutdown.wait(sleep_s)
             return
         mark_subtitle_failed(conn, video_id, f"RapidAPI /subtitle.php HTTP {status}")
+        return
+    except (requests.ConnectionError, requests.Timeout) as e:
+        _on_api_failure()
+        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
+        log.warning(f"[CONN-ERR] {video_id}: subtitle {e} — requeuing, sleeping {sleep_s}s")
+        requeue_subtitle(conn, video_id)
+        _shutdown.wait(sleep_s)
         return
     except Exception as e:
         mark_subtitle_failed(conn, video_id, str(e))

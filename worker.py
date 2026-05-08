@@ -288,6 +288,21 @@ def mark_failed(conn, video_id: str, error: str):
         conn.commit()
 
 
+def requeue_to_ready(conn, video_id: str) -> None:
+    """Return video to ready_for_download without incrementing media_retry_count.
+    Used when download failed due to infra (proxy down, network error) not video data."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE youtube.videos
+               SET media_status       = 'ready_for_download',
+                   media_locked_until = NULL
+               WHERE id = %s""",
+            (video_id,),
+        )
+        conn.commit()
+    log.info(f"[REQUEUE] {video_id} returned to ready_for_download (infra failure, no retry increment)")
+
+
 def process(
     conn, video_id: str, channel_handle: str, title: str, v_url: str, a_url: str
 ):
@@ -338,8 +353,21 @@ def process(
             mark_complete(conn, video_id, uploaded)
             log.info(f"[SUCCESS] {video_id} uploaded {[u[0] for u in uploaded]}")
 
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        if status in (403, 404, 410):
+            log.warning(f"[FAIL] {video_id}: HTTP {status} — URL expired or video gone")
+            mark_failed(conn, video_id, f"HTTP {status} — URL expired or video gone")
+        else:
+            log.warning(f"[REQUEUE] {video_id}: HTTP {status} transient")
+            requeue_to_ready(conn, video_id)
+    except (ConnectionError, OSError, RuntimeError) as e:
+        # ConnectionError = retry exhaustion from download_stream
+        # RuntimeError = incomplete download after stream closed
+        log.warning(f"[REQUEUE] {video_id}: {type(e).__name__} — {e}")
+        requeue_to_ready(conn, video_id)
     except Exception as e:
-        log.error(f"[FAIL] {video_id}: caching or download error — {e}")
+        log.error(f"[FAIL] {video_id}: {e}", exc_info=True)
         mark_failed(conn, video_id, str(e))
     finally:
         stop_heartbeat.set()

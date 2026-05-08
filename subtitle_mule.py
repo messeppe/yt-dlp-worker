@@ -138,6 +138,21 @@ def mark_failed(conn, video_id: str, error: str):
         conn.commit()
 
 
+def requeue_to_queued(conn, video_id: str) -> None:
+    """Return subtitle job to queued without incrementing subtitle_retry_count.
+    Keeps subtitle_raw_payload intact — no re-scout needed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE youtube.videos
+               SET subtitle_status       = 'queued',
+                   subtitle_locked_until = NULL
+               WHERE id = %s""",
+            (video_id,),
+        )
+        conn.commit()
+    log.info(f"[SUBTITLE-REQUEUE] {video_id} returned to queued (infra failure, payload preserved)")
+
+
 def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_path):
     with conn.cursor() as cur:
         cur.execute(
@@ -272,6 +287,7 @@ def process(conn, video_id, payload, channel_handle, title):
             f"[START] {video_id} — {len(tracks)} track(s): {[t['language_code'] for t in tracks]}"
         )
         success_count = 0
+        transient_fail_count = 0
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for track in tracks:
@@ -298,6 +314,11 @@ def process(conn, video_id, payload, channel_handle, title):
                     )
                     log.info(f"[DB] {video_id} lang={lang} upserted")
                     success_count += 1
+                except ConnectionError as e:
+                    # Retry exhaustion — proxy/network down, not video's fault
+                    transient_fail_count += 1
+                    log.warning(f"[SKIP-TRANSIENT] {video_id} lang={lang}: {e}")
+                    continue
                 except Exception as e:
                     log.warning(f"[SKIP] {video_id} lang={lang}: {e}")
                     continue
@@ -306,6 +327,11 @@ def process(conn, video_id, payload, channel_handle, title):
             mark_complete(conn, video_id)
             log.info(
                 f"[SUCCESS] {video_id} subtitle_status=completed — {success_count}/{len(tracks)} track(s) saved"
+            )
+        elif transient_fail_count == len(tracks):
+            requeue_to_queued(conn, video_id)
+            log.warning(
+                f"[TRANSIENT-ALL] {video_id}: all {len(tracks)} track(s) failed transiently — requeued"
             )
         else:
             mark_failed(conn, video_id, f"all {len(tracks)} track(s) failed to process")
