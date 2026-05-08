@@ -366,7 +366,7 @@ def process(conn, video_id, payload, channel_handle, title):
 
 def main():
     log.info(
-        f"Subtitle Mule started — target langs: {SUBTITLE_LANGS}, polling Postgres..."
+        "Subtitle Mule started — native ASR mode, polling Postgres..."
     )
     while True:
         try:
