@@ -206,13 +206,26 @@ def extract_target_tracks(payload: dict) -> list:
             }
     for track in payload.get("automated_subtitle", []):
         lang = track.get("language_code", "")
-        if lang in target_set and lang not in found:
+        url = track.get("url", "")
+        if lang in target_set and lang not in found and "tlang=" not in url:
             found[lang] = {
                 "language_code": lang,
-                "url": track["url"],
+                "url": url,
                 "is_automated": True,
             }
-    return [found[lang] for lang in SUBTITLE_LANGS if lang in found]
+    result = [found[lang] for lang in SUBTITLE_LANGS if lang in found]
+    if not result:
+        # No preferred lang available — fall back to native ASR (no tlang= in URL)
+        for track in payload.get("automated_subtitle", []):
+            url = track.get("url", "")
+            if "tlang=" not in url:
+                result.append({
+                    "language_code": track.get("language_code", ""),
+                    "url": url,
+                    "is_automated": True,
+                })
+                break
+    return result
 
 
 def vtt_url(url: str) -> str:
