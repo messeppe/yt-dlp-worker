@@ -71,6 +71,7 @@ def get_s3():
 
 
 def poll_job(conn):
+    row = None
     with conn.cursor() as cur:
         # Release stuck locks (crash recovery)
         cur.execute(
@@ -190,17 +191,24 @@ def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_pat
         conn.commit()
 
 
+def _lang_from_url(url: str) -> str:
+    m = re.search(r'[?&]lang=([^&]+)', url)
+    return m.group(1) if m else ""
+
+
 def extract_target_tracks(payload: dict) -> list:
     # Manual subtitles take priority (any language, assumed native)
     for track in payload.get("subtitle", []):
         url = track.get("url", "")
         if url:
-            return [{"language_code": track.get("language_code", ""), "url": url, "is_automated": False}]
+            lang = track.get("language_code", "") or _lang_from_url(url)
+            return [{"language_code": lang, "url": url, "is_automated": False}]
     # Native ASR — skip tlang= translation tracks
     for track in payload.get("automated_subtitle", []):
         url = track.get("url", "")
         if url and "tlang=" not in url:
-            return [{"language_code": track.get("language_code", ""), "url": url, "is_automated": True}]
+            lang = track.get("language_code", "") or _lang_from_url(url)
+            return [{"language_code": lang, "url": url, "is_automated": True}]
     return []
 
 
@@ -309,7 +317,7 @@ def process(conn, video_id, payload, channel_handle, title):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for track in tracks:
-                lang = track["language_code"]
+                lang = track["language_code"] or "unknown"
                 try:
                     content = download_vtt(
                         vtt_url(track["url"]), video_id=video_id, lang=lang

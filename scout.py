@@ -183,6 +183,18 @@ def requeue_subtitle(conn, video_id: str) -> None:
 def poll_job(conn):
     """Claim one queued video atomically. Skips videos with unexpired stream URLs."""
     with conn.cursor() as cur:
+        # Recovery: reset stuck processing videos (scout crashed before inserting into media_queue)
+        cur.execute(
+            """
+            UPDATE youtube.videos
+            SET media_status = 'queued', media_locked_until = NULL
+            WHERE media_status IN ('processing', 'ready_for_download')
+              AND media_locked_until < NOW()
+              AND NOT EXISTS (
+                  SELECT 1 FROM youtube.media_queue WHERE video_id = youtube.videos.id
+              )
+            """
+        )
         cur.execute(
             """
             UPDATE youtube.videos v
@@ -236,7 +248,6 @@ def poll_subtitle_job(conn):
                 SELECT id FROM youtube.videos
                 WHERE subtitle_status = 'pending'
                   AND media_status = 'completed'
-                  AND (duration IS NULL OR duration >= 60)
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
