@@ -19,6 +19,10 @@ LOW_QUOTA_THRESHOLD    = int(os.environ.get("LOW_QUOTA_THRESHOLD", "100"))
 HARD_QUOTA_THRESHOLD   = int(os.environ.get("HARD_QUOTA_THRESHOLD", "20"))
 CIRCUIT_OPEN_THRESHOLD = int(os.environ.get("CIRCUIT_OPEN_THRESHOLD", "3"))
 CIRCUIT_SLEEP_BASE     = int(os.environ.get("CIRCUIT_SLEEP_BASE", "300"))
+MAX_MEDIA_QUEUE    = int(os.environ.get("MAX_MEDIA_QUEUE", "50"))
+MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "10"))
+MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "50"))
+MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "10"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
@@ -35,6 +39,8 @@ log = logging.getLogger(_WORKER_ID)
 _quota_remaining: int | None = None
 _quota_reset_at: int = 0  # Unix timestamp when quota window resets
 _consecutive_api_failures: int = 0
+_media_paused: bool = False
+_subtitle_paused: bool = False
 
 _shutdown = threading.Event()
 
@@ -133,6 +139,18 @@ def persist_quota(conn) -> None:
         log.warning(f"[QUOTA-DB] failed to persist quota state: {e}")
 
 
+def _media_queue_depth(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM youtube.media_queue")
+        return cur.fetchone()[0]
+
+
+def _subtitle_queue_depth(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM youtube.subtitle_queue")
+        return cur.fetchone()[0]
+
+
 def requeue(conn, video_id: str) -> None:
     """Return a video to queued status without incrementing media_retry_count.
     Used on 429/5xx — video was not processed, so retry count must not increase."""
@@ -199,7 +217,7 @@ def poll_subtitle_job(conn):
             """
             UPDATE youtube.videos
             SET subtitle_status      = CASE
-                WHEN subtitle_raw_payload IS NOT NULL THEN 'queued'
+                WHEN EXISTS (SELECT 1 FROM youtube.subtitle_queue sq WHERE sq.video_id = youtube.videos.id) THEN 'queued'
                 ELSE 'pending'
             END,
             subtitle_locked_until = NULL
@@ -217,6 +235,8 @@ def poll_subtitle_job(conn):
             WHERE v.id = (
                 SELECT id FROM youtube.videos
                 WHERE subtitle_status = 'pending'
+                  AND media_status = 'completed'
+                  AND (duration IS NULL OR duration >= 60)
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -292,19 +312,29 @@ def pick_streams(results: list):
     return best_video(videos), sorted(audios, key=lambda r: r.get("quality", ""), reverse=True)[0]
 
 
-def mark_ready(conn, video_id: str, video_url: str, audio_url: str):
+def mark_ready(conn, video_id: str, video_url: str, audio_url: str) -> bool:
+    """Insert into media_queue. Returns True if inserted/updated, False if queue full."""
     with conn.cursor() as cur:
         cur.execute(
-            """UPDATE youtube.videos
-               SET media_status = 'ready_for_download',
-                   media_locked_until = NULL,
-                   video_stream_url = %s,
-                   audio_stream_url = %s,
-                   stream_url_expires_at = NOW() + INTERVAL '4 hours'
-               WHERE id = %s""",
-            (video_url, audio_url, video_id),
+            """INSERT INTO youtube.media_queue
+                   (video_id, video_stream_url, audio_stream_url, url_expires_at)
+               SELECT %s, %s, %s, NOW() + INTERVAL '6 hours'
+               WHERE (SELECT COUNT(*) FROM youtube.media_queue) < %s
+               ON CONFLICT (video_id) DO UPDATE SET
+                   video_stream_url = EXCLUDED.video_stream_url,
+                   audio_stream_url = EXCLUDED.audio_stream_url,
+                   url_expires_at   = EXCLUDED.url_expires_at
+               RETURNING id""",
+            (video_id, video_url, audio_url, MAX_MEDIA_QUEUE),
         )
+        inserted = cur.fetchone() is not None
+        if inserted:
+            cur.execute(
+                "UPDATE youtube.videos SET media_status='ready_for_download', media_locked_until=NULL WHERE id=%s",
+                (video_id,),
+            )
         conn.commit()
+    return inserted
 
 
 def mark_failed(conn, video_id: str, error: str):
@@ -321,21 +351,29 @@ def mark_failed(conn, video_id: str, error: str):
         conn.commit()
 
 
-def mark_subtitle_queued(conn, video_id: str, payload: dict) -> None:
-    """Store subtitle payload and transition subtitle_status to queued.
-    subtitle_mule picks this up and downloads the actual VTT files."""
+def mark_subtitle_queued(conn, video_id: str, payload: dict) -> bool:
+    """Insert into subtitle_queue. Returns True if inserted/updated, False if queue full."""
     with conn.cursor() as cur:
         cur.execute(
-            """UPDATE youtube.videos
-               SET subtitle_status         = 'queued',
-                   subtitle_raw_payload    = %s::jsonb,
-                   subtitle_url_expires_at = NOW() + INTERVAL '6 hours',
-                   subtitle_locked_until   = NULL
-               WHERE id = %s""",
-            (json.dumps(payload), video_id),
+            """INSERT INTO youtube.subtitle_queue (video_id, payload, url_expires_at)
+               SELECT %s, %s::jsonb, NOW() + INTERVAL '6 hours'
+               WHERE (SELECT COUNT(*) FROM youtube.subtitle_queue) < %s
+               ON CONFLICT (video_id) DO UPDATE SET
+                   payload        = EXCLUDED.payload,
+                   url_expires_at = EXCLUDED.url_expires_at
+               RETURNING id""",
+            (video_id, json.dumps(payload), MAX_SUBTITLE_QUEUE),
         )
+        inserted = cur.fetchone() is not None
+        if inserted:
+            cur.execute(
+                "UPDATE youtube.videos SET subtitle_status='queued', subtitle_locked_until=NULL WHERE id=%s",
+                (video_id,),
+            )
         conn.commit()
-    log.info(f"[SUBTITLE-CACHED] {video_id} subtitle payload stored, ready for subtitle mule")
+    if inserted:
+        log.info(f"[SUBTITLE-CACHED] {video_id} subtitle payload stored, ready for subtitle mule")
+    return inserted
 
 
 def mark_subtitle_no_captions(conn, video_id: str) -> None:
@@ -384,6 +422,16 @@ def process(conn, video_id: str):
     delay = _adaptive_delay()
     if delay > 0:
         time.sleep(delay)
+
+    # Backpressure: check queue depth before burning API quota
+    global _media_paused
+    depth = _media_queue_depth(conn)
+    if depth >= MAX_MEDIA_QUEUE:
+        if not _media_paused:
+            log.info(f"[BACKPRESSURE] media_queue={depth} >= {MAX_MEDIA_QUEUE} — pausing media scout")
+        _media_paused = True
+        requeue(conn, video_id)
+        return
 
     try:
         title, results = get_streams(video_id)
@@ -437,7 +485,10 @@ def process(conn, video_id: str):
     v_url = video_stream["url"]
     a_url = audio_stream["url"] if audio_stream else None
 
-    mark_ready(conn, video_id, v_url, a_url)
+    if not mark_ready(conn, video_id, v_url, a_url):
+        log.info(f"[BACKPRESSURE] media_queue full ({MAX_MEDIA_QUEUE}) — requeuing {video_id}")
+        requeue(conn, video_id)
+        return
     log.info(f"[CACHED] {video_id} URLs extracted and ready for Mule")
 
 
@@ -457,6 +508,16 @@ def process_subtitle(conn, video_id: str) -> None:
     delay = _adaptive_delay()
     if delay > 0:
         time.sleep(delay)
+
+    # Backpressure: check queue depth before burning API quota
+    global _subtitle_paused
+    depth = _subtitle_queue_depth(conn)
+    if depth >= MAX_SUBTITLE_QUEUE:
+        if not _subtitle_paused:
+            log.info(f"[BACKPRESSURE] subtitle_queue={depth} >= {MAX_SUBTITLE_QUEUE} — pausing subtitle scout")
+        _subtitle_paused = True
+        requeue_subtitle(conn, video_id)
+        return
 
     try:
         payload = get_subtitle_payload(video_id)
@@ -514,10 +575,14 @@ def process_subtitle(conn, video_id: str) -> None:
         mark_subtitle_no_captions(conn, video_id)
         return
 
-    mark_subtitle_queued(conn, video_id, results)  # store results dict so mule reads subtitle/automated_subtitle directly
+    if not mark_subtitle_queued(conn, video_id, results):
+        log.info(f"[BACKPRESSURE] subtitle_queue full ({MAX_SUBTITLE_QUEUE}) — requeuing {video_id}")
+        requeue_subtitle(conn, video_id)
+        return
 
 
 def main():
+    global _media_paused, _subtitle_paused
     log.info("Scout started — polling for media (queued) and subtitle (pending) jobs...")
     while True:
         try:
@@ -529,18 +594,30 @@ def main():
 
     try:
         while not _shutdown.is_set():
-            try:
-                # Priority 1: media jobs (queued → ready_for_download)
-                video_id = poll_job(conn)
-                if video_id:
-                    process(conn, video_id)
-                    continue
+            # Backpressure: check depths, clear pause flags if drained
+            if _media_paused:
+                if _media_queue_depth(conn) <= MIN_MEDIA_QUEUE:
+                    log.info("Scout [BACKPRESSURE-RESUME] media_queue drained — resuming media scout")
+                    _media_paused = False
+            if _subtitle_paused:
+                if _subtitle_queue_depth(conn) <= MIN_SUBTITLE_QUEUE:
+                    log.info("Scout [BACKPRESSURE-RESUME] subtitle_queue drained — resuming subtitle scout")
+                    _subtitle_paused = False
 
-                # Priority 2: subtitle jobs (pending → queued payload stored)
-                video_id = poll_subtitle_job(conn)
-                if video_id:
-                    process_subtitle(conn, video_id)
-                    continue
+            try:
+                # Priority 1: media jobs (queued → ready_for_download) — skip if paused
+                if not _media_paused:
+                    video_id = poll_job(conn)
+                    if video_id:
+                        process(conn, video_id)
+                        continue
+
+                # Priority 2: subtitle jobs (pending → queued payload stored) — skip if paused
+                if not _subtitle_paused:
+                    video_id = poll_subtitle_job(conn)
+                    if video_id:
+                        process_subtitle(conn, video_id)
+                        continue
 
             except Exception as e:
                 log.error(f"Scout poll error: {e} — reconnecting", exc_info=True)
@@ -555,8 +632,11 @@ def main():
                     pass
                 continue
 
-            # Nothing to do — idle wait
-            _shutdown.wait(POLL_INTERVAL)
+            # Both paused → longer sleep; otherwise normal idle wait
+            if _media_paused and _subtitle_paused:
+                _shutdown.wait(30)
+            else:
+                _shutdown.wait(POLL_INTERVAL)
     finally:
         try:
             conn.close()

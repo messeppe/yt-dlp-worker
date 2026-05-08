@@ -75,29 +75,51 @@ def get_s3():
 
 def poll_job(conn):
     with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE youtube.videos v
-            SET subtitle_status = 'processing',
-                subtitle_locked_until = NOW() + INTERVAL '5 minutes'
-            WHERE v.id = (
-                SELECT id FROM youtube.videos
-                WHERE subtitle_status = 'queued'
-                  AND subtitle_url_expires_at > NOW()
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
+        # Release stuck locks (crash recovery)
+        cur.execute(
+            """UPDATE youtube.subtitle_queue
+               SET locked_until = NULL
+               WHERE locked_until IS NOT NULL AND locked_until < NOW()
+                 AND url_expires_at > NOW()"""
+        )
+        # Delete expired URLs, reset videos to pending for re-scouting
+        cur.execute(
+            """DELETE FROM youtube.subtitle_queue
+               WHERE url_expires_at <= NOW()
+               RETURNING video_id"""
+        )
+        expired = [r[0] for r in cur.fetchall()]
+        if expired:
+            cur.execute(
+                "UPDATE youtube.videos SET subtitle_status='pending' WHERE id=ANY(%s)",
+                (expired,),
             )
-            RETURNING
-                v.id,
-                v.subtitle_raw_payload,
-                COALESCE(
-                    (SELECT NULLIF(c.handle,'') FROM youtube.channels c WHERE c.id = v.channel_id),
-                    (SELECT NULLIF(c.title,'')  FROM youtube.channels c WHERE c.id = v.channel_id),
-                    NULLIF(v.channel_id,''),
-                    'unknown'
-                ) AS channel_handle,
-                v.title
-        """)
+        # Claim one job — soonest-to-expire first
+        cur.execute(
+            """UPDATE youtube.subtitle_queue sq
+               SET locked_until = NOW() + INTERVAL '5 minutes'
+               WHERE sq.id = (
+                   SELECT id FROM youtube.subtitle_queue
+                   WHERE locked_until IS NULL
+                   ORDER BY url_expires_at ASC
+                   LIMIT 1
+                   FOR UPDATE SKIP LOCKED
+               )
+               RETURNING
+                   sq.video_id,
+                   sq.payload,
+                   (SELECT COALESCE(NULLIF(c.handle,''), NULLIF(c.title,''), sq.video_id)
+                    FROM youtube.videos v
+                    JOIN youtube.channels c ON c.id = v.channel_id
+                    WHERE v.id = sq.video_id) AS channel_handle,
+                   (SELECT v.title FROM youtube.videos v WHERE v.id = sq.video_id)"""
+        )
         row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE youtube.videos SET subtitle_status='processing' WHERE id=%s",
+                (row[0],),
+            )
         conn.commit()
     if row:
         return row[0], row[1], row[2] or "unknown", row[3]
@@ -109,7 +131,7 @@ def renew_lock(conn, video_id: str, stop_event: threading.Event):
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE youtube.videos SET subtitle_locked_until = NOW() + INTERVAL '5 minutes' WHERE id = %s",
+                    "UPDATE youtube.subtitle_queue SET locked_until = NOW() + INTERVAL '5 minutes' WHERE video_id = %s",
                     (video_id,),
                 )
                 conn.commit()
@@ -119,8 +141,9 @@ def renew_lock(conn, video_id: str, stop_event: threading.Event):
 
 def mark_complete(conn, video_id: str):
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM youtube.subtitle_queue WHERE video_id = %s", (video_id,))
         cur.execute(
-            "UPDATE youtube.videos SET subtitle_status='completed', subtitle_locked_until=NULL WHERE id=%s",
+            "UPDATE youtube.videos SET subtitle_status='completed' WHERE id=%s",
             (video_id,),
         )
         conn.commit()
@@ -128,9 +151,10 @@ def mark_complete(conn, video_id: str):
 
 def mark_failed(conn, video_id: str, error: str):
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM youtube.subtitle_queue WHERE video_id = %s", (video_id,))
         cur.execute(
             """UPDATE youtube.videos
-            SET subtitle_status='failed', subtitle_locked_until=NULL,
+            SET subtitle_status='failed',
                 subtitle_last_error=%s, subtitle_retry_count=subtitle_retry_count+1
             WHERE id=%s""",
             (error[:500], video_id),
@@ -139,18 +163,18 @@ def mark_failed(conn, video_id: str, error: str):
 
 
 def requeue_to_queued(conn, video_id: str) -> None:
-    """Return subtitle job to queued without incrementing subtitle_retry_count.
-    Keeps subtitle_raw_payload intact — no re-scout needed."""
+    """Release lock in subtitle_queue — row stays for next mule to claim."""
     with conn.cursor() as cur:
         cur.execute(
-            """UPDATE youtube.videos
-               SET subtitle_status       = 'queued',
-                   subtitle_locked_until = NULL
-               WHERE id = %s""",
+            "UPDATE youtube.subtitle_queue SET locked_until=NULL WHERE video_id=%s",
+            (video_id,),
+        )
+        cur.execute(
+            "UPDATE youtube.videos SET subtitle_status='queued' WHERE id=%s",
             (video_id,),
         )
         conn.commit()
-    log.info(f"[SUBTITLE-REQUEUE] {video_id} returned to queued (infra failure, payload preserved)")
+    log.info(f"[SUBTITLE-REQUEUE] {video_id} lock released, back in subtitle_queue")
 
 
 def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_path):

@@ -61,47 +61,67 @@ def get_s3():
 
 
 def poll_job(conn):
-    """Claim one ready video atomically using media_locked_until."""
+    """Claim one job from media_queue atomically."""
     with conn.cursor() as cur:
+        # Release stuck locks (crash recovery)
         cur.execute(
-            """
-            UPDATE youtube.videos v
-            SET media_status = 'processing',
-                media_locked_until = NOW() + INTERVAL '5 minutes'
-            WHERE v.id = (
-                SELECT id FROM youtube.videos
-                WHERE media_status = 'ready_for_download'
-                  AND stream_url_expires_at > NOW()
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
+            """UPDATE youtube.media_queue
+               SET locked_until = NULL
+               WHERE locked_until IS NOT NULL AND locked_until < NOW()
+                 AND url_expires_at > NOW()"""
+        )
+        # Delete expired URLs, reset videos to queued for re-scouting
+        cur.execute(
+            """DELETE FROM youtube.media_queue
+               WHERE url_expires_at <= NOW()
+               RETURNING video_id"""
+        )
+        expired = [r[0] for r in cur.fetchall()]
+        if expired:
+            cur.execute(
+                "UPDATE youtube.videos SET media_status='queued' WHERE id=ANY(%s)",
+                (expired,),
             )
-            RETURNING
-                v.id,
-                COALESCE(
-                    (SELECT NULLIF(c.handle, '') FROM youtube.channels c WHERE c.id = v.channel_id),
-                    (SELECT NULLIF(c.title, '') FROM youtube.channels c WHERE c.id = v.channel_id),
-                    NULLIF(v.channel_id, ''),
-                    'unknown'
-                ) AS channel_handle,
-                v.title,
-                v.video_stream_url,
-                v.audio_stream_url
-            """
+        # Claim one job — soonest-to-expire first
+        cur.execute(
+            """UPDATE youtube.media_queue mq
+               SET locked_until = NOW() + INTERVAL '5 minutes'
+               WHERE mq.id = (
+                   SELECT id FROM youtube.media_queue
+                   WHERE locked_until IS NULL
+                   ORDER BY url_expires_at ASC
+                   LIMIT 1
+                   FOR UPDATE SKIP LOCKED
+               )
+               RETURNING
+                   mq.video_id,
+                   mq.video_stream_url,
+                   mq.audio_stream_url,
+                   (SELECT COALESCE(NULLIF(c.handle,''), NULLIF(c.title,''), mq.video_id)
+                    FROM youtube.videos v
+                    JOIN youtube.channels c ON c.id = v.channel_id
+                    WHERE v.id = mq.video_id) AS channel_handle,
+                   (SELECT v.title FROM youtube.videos v WHERE v.id = mq.video_id)"""
         )
         row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE youtube.videos SET media_status='processing' WHERE id=%s",
+                (row[0],),
+            )
         conn.commit()
     if row:
-        return row[0], row[1] or "unknown", row[2], row[3], row[4]
+        return row[0], row[1], row[2], row[3] or "unknown", row[4]
     return None, None, None, None, None
 
 
 def renew_lock(conn, video_id: str, stop_event: threading.Event):
-    """Background thread: extend media_locked_until every 60s."""
+    """Background thread: extend media_queue locked_until every 60s."""
     while not stop_event.wait(60):
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE youtube.videos SET media_locked_until = NOW() + INTERVAL '5 minutes' WHERE id = %s",
+                    "UPDATE youtube.media_queue SET locked_until = NOW() + INTERVAL '5 minutes' WHERE video_id = %s",
                     (video_id,),
                 )
                 conn.commit()
@@ -267,8 +287,9 @@ def mark_complete(conn, video_id: str, files: list):
                     mime_type,
                 ),
             )
+        cur.execute("DELETE FROM youtube.media_queue WHERE video_id = %s", (video_id,))
         cur.execute(
-            "UPDATE youtube.videos SET media_status = 'completed', media_locked_until = NULL WHERE id = %s",
+            "UPDATE youtube.videos SET media_status='completed' WHERE id=%s",
             (video_id,),
         )
         conn.commit()
@@ -276,31 +297,31 @@ def mark_complete(conn, video_id: str, files: list):
 
 def mark_failed(conn, video_id: str, error: str):
     with conn.cursor() as cur:
+        cur.execute("DELETE FROM youtube.media_queue WHERE video_id = %s", (video_id,))
         cur.execute(
             """UPDATE youtube.videos
-               SET media_status = 'failed',
-                   media_locked_until = NULL,
-                   media_last_error = %s,
-                   media_retry_count = media_retry_count + 1
-               WHERE id = %s""",
+               SET media_status='failed',
+                   media_last_error=%s,
+                   media_retry_count=media_retry_count+1
+               WHERE id=%s""",
             (error[:500], video_id),
         )
         conn.commit()
 
 
 def requeue_to_ready(conn, video_id: str) -> None:
-    """Return video to ready_for_download without incrementing media_retry_count.
-    Used when download failed due to infra (proxy down, network error) not video data."""
+    """Release lock in media_queue — row stays for next worker to claim."""
     with conn.cursor() as cur:
         cur.execute(
-            """UPDATE youtube.videos
-               SET media_status       = 'ready_for_download',
-                   media_locked_until = NULL
-               WHERE id = %s""",
+            "UPDATE youtube.media_queue SET locked_until=NULL WHERE video_id=%s",
+            (video_id,),
+        )
+        cur.execute(
+            "UPDATE youtube.videos SET media_status='ready_for_download' WHERE id=%s",
             (video_id,),
         )
         conn.commit()
-    log.info(f"[REQUEUE] {video_id} returned to ready_for_download (infra failure, no retry increment)")
+    log.info(f"[REQUEUE] {video_id} lock released, back in media_queue")
 
 
 def process(
@@ -386,7 +407,7 @@ def main():
     try:
         while not _shutdown.is_set():
             try:
-                vid, chan, t, v_url, a_url = poll_job(conn)
+                vid, v_url, a_url, chan, t = poll_job(conn)
             except Exception as e:
                 log.error(f"Mule poll error: {e}")
                 time.sleep(5)
