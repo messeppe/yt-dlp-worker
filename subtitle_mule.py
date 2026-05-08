@@ -177,8 +177,8 @@ def extract_target_tracks(payload: dict) -> list:
 
 
 def vtt_url(url: str) -> str:
-    """Replace fmt=json3 with fmt=vtt3 to get WebVTT directly."""
-    return re.sub(r"\bfmt=json3\b", "fmt=vtt3", url)
+    """Replace fmt=json3 with fmt=vtt to get WebVTT directly."""
+    return re.sub(r"\bfmt=json3\b", "fmt=vtt", url)
 
 
 def download_vtt(url: str, video_id: str = "", lang: str = "") -> str:
