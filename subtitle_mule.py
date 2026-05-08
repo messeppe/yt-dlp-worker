@@ -20,9 +20,6 @@ PROXY_URL = os.environ["PROXY_URL"]
 PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
-SUBTITLE_LANGS = [
-    l.strip() for l in os.environ.get("SUBTITLE_LANGS", "id,ar").split(",") if l.strip()
-]
 
 _WORKER_ID = os.environ.get("WORKER_ID", "subtitle-mule")
 logging.basicConfig(
@@ -194,38 +191,17 @@ def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_pat
 
 
 def extract_target_tracks(payload: dict) -> list:
-    target_set = set(SUBTITLE_LANGS)
-    found = {}
+    # Manual subtitles take priority (any language, assumed native)
     for track in payload.get("subtitle", []):
-        lang = track.get("language_code", "")
-        if lang in target_set and lang not in found:
-            found[lang] = {
-                "language_code": lang,
-                "url": track["url"],
-                "is_automated": False,
-            }
-    for track in payload.get("automated_subtitle", []):
-        lang = track.get("language_code", "")
         url = track.get("url", "")
-        if lang in target_set and lang not in found and "tlang=" not in url:
-            found[lang] = {
-                "language_code": lang,
-                "url": url,
-                "is_automated": True,
-            }
-    result = [found[lang] for lang in SUBTITLE_LANGS if lang in found]
-    if not result:
-        # No preferred lang available — fall back to native ASR (no tlang= in URL)
-        for track in payload.get("automated_subtitle", []):
-            url = track.get("url", "")
-            if "tlang=" not in url:
-                result.append({
-                    "language_code": track.get("language_code", ""),
-                    "url": url,
-                    "is_automated": True,
-                })
-                break
-    return result
+        if url:
+            return [{"language_code": track.get("language_code", ""), "url": url, "is_automated": False}]
+    # Native ASR — skip tlang= translation tracks
+    for track in payload.get("automated_subtitle", []):
+        url = track.get("url", "")
+        if url and "tlang=" not in url:
+            return [{"language_code": track.get("language_code", ""), "url": url, "is_automated": True}]
+    return []
 
 
 def vtt_url(url: str) -> str:
