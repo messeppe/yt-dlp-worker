@@ -254,7 +254,7 @@ def get_subtitle_payload(video_id: str) -> dict:
     resp = requests.get(
         url,
         headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
-        params={"id": video_id},
+        params={"id": video_id, "type": "vtt"},
         timeout=(10, 30),
     )
     _update_quota_state(resp)  # read headers before raise_for_status (captures 429 headers too)
@@ -497,22 +497,24 @@ def process_subtitle(conn, video_id: str) -> None:
         log.error(f"[SUBTITLE-FAIL] {video_id}: {e}", exc_info=True)
         return
 
-    # 3-way response classification:
-    # Has captions  → "subtitle" key present, at least one array non-empty → store + queue for mule
-    # No captions   → "subtitle" key present, both arrays empty → mark completed
-    # API/video err → "subtitle" key absent → mark failed
-    if "subtitle" not in payload:
+    # 3-way response classification — data lives under payload["results"] with type=vtt
+    results = payload.get("results") or {}
+    # Backward compat: old payloads stored before this fix may have subtitle at top level
+    if "subtitle" not in results and "subtitle" in payload:
+        results = payload
+
+    if "subtitle" not in results:
         error_msg = payload.get("message") or payload.get("msg") or str(payload)[:200]
         mark_subtitle_failed(conn, video_id, f"API error: {error_msg}")
         return
 
-    human_tracks = payload.get("subtitle", [])
-    auto_tracks = payload.get("automated_subtitle", [])
+    human_tracks = results.get("subtitle", [])
+    auto_tracks = results.get("automated_subtitle", [])
     if not human_tracks and not auto_tracks:
         mark_subtitle_no_captions(conn, video_id)
         return
 
-    mark_subtitle_queued(conn, video_id, payload)
+    mark_subtitle_queued(conn, video_id, results)  # store results dict so mule reads subtitle/automated_subtitle directly
 
 
 def main():
