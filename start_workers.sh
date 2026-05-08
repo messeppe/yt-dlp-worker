@@ -21,8 +21,8 @@ WORKER_ID="scout" python -u /app/scout.py &
 pids+=($!)
 
 for i in $(seq 1 "$WORKER_COUNT"); do
-    log "Spawning Media Mule (worker-$i)..."
-    WORKER_ID="worker-$i" python -u /app/worker.py &
+    log "Spawning Media Mule (media-mule-$i)..."
+    WORKER_ID="media-mule-$i" python -u /app/media_mule.py &
     pids+=($!)
 done
 

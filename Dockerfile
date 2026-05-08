@@ -8,7 +8,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
-COPY worker.py .
+COPY media_mule.py .
 COPY scout.py .
 COPY subtitle_mule.py .
 COPY start_workers.sh .

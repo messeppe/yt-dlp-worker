@@ -23,7 +23,7 @@ MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
 STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "15"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
 
-_WORKER_ID = os.environ.get("WORKER_ID", "mule")
+_WORKER_ID = os.environ.get("WORKER_ID", "media-mule")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-5s | %(name)-16s | %(message)s",
