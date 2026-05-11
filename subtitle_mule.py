@@ -430,4 +430,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    worker_count = int(os.environ.get("SUBTITLE_WORKER_COUNT", "1"))
+    if worker_count <= 1:
+        main()
+    else:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(main) for _ in range(worker_count)]
+            concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
