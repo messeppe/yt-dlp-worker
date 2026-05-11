@@ -10,6 +10,7 @@ import time
 import boto3
 import psycopg2
 import requests
+from logging_setup import setup_logging
 
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
 S3_BUCKET = os.environ["S3_BUCKET"]
@@ -23,12 +24,7 @@ MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
 MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
 
 _WORKER_ID = os.environ.get("WORKER_ID", "subtitle-mule")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-5s | %(name)-16s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(_WORKER_ID)
+log = setup_logging(_WORKER_ID)
 
 _shutdown = threading.Event()
 

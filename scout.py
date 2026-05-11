@@ -10,6 +10,7 @@ from urllib.parse import urlparse, parse_qs
 import requests
 import psycopg2
 import psycopg2.pool
+from logging_setup import setup_logging
 
 DB_URL         = os.environ["SUPABASE_DB_URL"]
 RAPIDAPI_KEY   = os.environ["RAPIDAPI_KEY"]
@@ -30,12 +31,7 @@ RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
 _WORKER_ID = os.environ.get("WORKER_ID", "scout")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-5s | %(name)-16s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(_WORKER_ID)
+log = setup_logging(_WORKER_ID)
 
 # Global quota state — updated from RapidAPI response headers after every call.
 # None = state unknown (no successful call yet or headers absent).

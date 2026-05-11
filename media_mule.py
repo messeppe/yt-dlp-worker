@@ -10,6 +10,7 @@ import boto3
 import psycopg2
 import psycopg2.pool
 import requests
+from logging_setup import setup_logging
 
 PROXY_URL = os.environ["PROXY_URL"]
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
@@ -25,12 +26,7 @@ STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "15"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
 
 _WORKER_ID = os.environ.get("WORKER_ID", "media-mule")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-5s | %(name)-16s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(_WORKER_ID)
+log = setup_logging(_WORKER_ID)
 
 _shutdown = threading.Event()
 
@@ -338,15 +334,15 @@ def mark_failed(conn, video_id: str, error: str):
 def requeue_to_ready(conn, video_id: str) -> None:
     """Release lock in media_queue — row stays for next worker to claim."""
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE youtube.media_queue SET locked_until=NULL WHERE video_id=%s",
-            (video_id,),
-        )
-        cur.execute(
-            "UPDATE youtube.videos SET media_status='ready_for_download' WHERE id=%s",
-            (video_id,),
-        )
-        conn.commit()
+            cur.execute(
+                "UPDATE youtube.media_queue SET locked_until=NULL WHERE video_id=%s",
+                (video_id,),
+            )
+            cur.execute(
+                "UPDATE youtube.videos SET media_status='ready_for_download' WHERE id=%s",
+                (video_id,),
+            )
+            conn.commit()
     log.info(f"[REQUEUE] {video_id} lock released, back in media_queue")
 
 
