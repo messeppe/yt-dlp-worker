@@ -1,9 +1,12 @@
 services:
-  yt-workers:
+
+  yt-api-scout:
     build: .
+    command: ["python", "-u", "scout.py"]
     labels:
       - traefik.enable=false
     environment:
+      WORKER_ID: scout
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
       RAPIDAPI_HOST: ${RAPIDAPI_HOST}
@@ -12,16 +15,29 @@ services:
       MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
       MAX_SUBTITLE_QUEUE: ${MAX_SUBTITLE_QUEUE:-10}
       MIN_SUBTITLE_QUEUE: ${MIN_SUBTITLE_QUEUE:-3}
+    restart: unless-stopped
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=scout,app=videomasjid"
+
+  yt-media-mule-1:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-1
       PROXY_URL: ${PROXY_URL}
       PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
       MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
-      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
       S3_ENDPOINT: ${S3_ENDPOINT}
       S3_BUCKET: ${S3_BUCKET}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
-      WORKER_COUNT: ${WORKER_COUNT:-20}
-      SUBTITLE_WORKER_COUNT: ${SUBTITLE_WORKER_COUNT:-20}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
     restart: unless-stopped
     tmpfs:
       - /tmp
@@ -29,4 +45,979 @@ services:
       driver: loki
       options:
         loki-url: "http://localhost:3100/loki/api/v1/push"
-        loki-external-labels: "service=yt-workers,app=videomasjid"
+        loki-external-labels: "service=media-mule,instance=1,app=videomasjid"
+
+  yt-media-mule-2:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-2
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=2,app=videomasjid"
+
+  yt-media-mule-3:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-3
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=3,app=videomasjid"
+
+  yt-media-mule-4:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-4
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=4,app=videomasjid"
+
+  yt-media-mule-5:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-5
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=5,app=videomasjid"
+
+  yt-media-mule-6:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-6
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=6,app=videomasjid"
+
+  yt-media-mule-7:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-7
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=7,app=videomasjid"
+
+  yt-media-mule-8:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-8
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=8,app=videomasjid"
+
+  yt-media-mule-9:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-9
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=9,app=videomasjid"
+
+  yt-media-mule-10:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-10
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=10,app=videomasjid"
+
+  yt-media-mule-11:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-11
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=11,app=videomasjid"
+
+  yt-media-mule-12:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-12
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=12,app=videomasjid"
+
+  yt-media-mule-13:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-13
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=13,app=videomasjid"
+
+  yt-media-mule-14:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-14
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=14,app=videomasjid"
+
+  yt-media-mule-15:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-15
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=15,app=videomasjid"
+
+  yt-media-mule-16:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-16
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=16,app=videomasjid"
+
+  yt-media-mule-17:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-17
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=17,app=videomasjid"
+
+  yt-media-mule-18:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-18
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=18,app=videomasjid"
+
+  yt-media-mule-19:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-19
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=19,app=videomasjid"
+
+  yt-media-mule-20:
+    build: .
+    command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: media-mule-20
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_ATTEMPTS_PER_VIDEO: ${MAX_ATTEMPTS_PER_VIDEO:-20}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=media-mule,instance=20,app=videomasjid"
+
+  yt-subtitle-mule-1:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-1
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=1,app=videomasjid"
+
+  yt-subtitle-mule-2:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-2
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=2,app=videomasjid"
+
+  yt-subtitle-mule-3:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-3
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=3,app=videomasjid"
+
+  yt-subtitle-mule-4:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-4
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=4,app=videomasjid"
+
+  yt-subtitle-mule-5:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-5
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=5,app=videomasjid"
+
+  yt-subtitle-mule-6:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-6
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=6,app=videomasjid"
+
+  yt-subtitle-mule-7:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-7
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=7,app=videomasjid"
+
+  yt-subtitle-mule-8:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-8
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=8,app=videomasjid"
+
+  yt-subtitle-mule-9:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-9
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=9,app=videomasjid"
+
+  yt-subtitle-mule-10:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-10
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=10,app=videomasjid"
+
+  yt-subtitle-mule-11:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-11
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=11,app=videomasjid"
+
+  yt-subtitle-mule-12:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-12
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=12,app=videomasjid"
+
+  yt-subtitle-mule-13:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-13
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=13,app=videomasjid"
+
+  yt-subtitle-mule-14:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-14
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=14,app=videomasjid"
+
+  yt-subtitle-mule-15:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-15
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=15,app=videomasjid"
+
+  yt-subtitle-mule-16:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-16
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=16,app=videomasjid"
+
+  yt-subtitle-mule-17:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-17
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=17,app=videomasjid"
+
+  yt-subtitle-mule-18:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-18
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=18,app=videomasjid"
+
+  yt-subtitle-mule-19:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-19
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=19,app=videomasjid"
+
+  yt-subtitle-mule-20:
+    build: .
+    command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
+    environment:
+      WORKER_ID: subtitle-mule-20
+      PROXY_URL: ${PROXY_URL}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      MAX_RETRIES: ${MAX_RETRIES:-10}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-10}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+    restart: unless-stopped
+    tmpfs:
+      - /tmp
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-external-labels: "service=subtitle-mule,instance=20,app=videomasjid"
