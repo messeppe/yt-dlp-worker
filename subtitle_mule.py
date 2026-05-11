@@ -136,17 +136,29 @@ def poll_job(conn):
     return None, None, None, None
 
 
-def renew_lock(conn, video_id: str, stop_event: threading.Event):
-    while not stop_event.wait(60):
+def renew_lock(video_id: str, stop_event: threading.Event):
+    """Background thread: extend subtitle_queue locked_until every 60s using its own connection."""
+    try:
+        hb_conn = psycopg2.connect(DB_URL, options="-c timezone=Asia/Jakarta")
+    except Exception as e:
+        log.warning(f"[HEARTBEAT] {video_id}: connect failed: {e}")
+        return
+    try:
+        while not stop_event.wait(60):
+            try:
+                with hb_conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE youtube.subtitle_queue SET locked_until = NOW() + INTERVAL '5 minutes' WHERE video_id = %s",
+                        (video_id,),
+                    )
+                    hb_conn.commit()
+            except Exception as e:
+                log.warning(f"[HEARTBEAT] {video_id}: {e}")
+    finally:
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE youtube.subtitle_queue SET locked_until = NOW() + INTERVAL '5 minutes' WHERE video_id = %s",
-                    (video_id,),
-                )
-                conn.commit()
-        except Exception as e:
-            log.warning(f"[HEARTBEAT] {video_id}: {e}")
+            hb_conn.close()
+        except Exception:
+            pass
 
 
 def mark_complete(conn, video_id: str):
@@ -309,7 +321,7 @@ def process(conn, video_id, payload, channel_handle, title):
 
     stop_heartbeat = threading.Event()
     heartbeat = threading.Thread(
-        target=renew_lock, args=(conn, video_id, stop_heartbeat), daemon=True
+        target=renew_lock, args=(video_id, stop_heartbeat), daemon=True
     )
     heartbeat.start()
 
@@ -420,7 +432,19 @@ def main():
 
             if video_id:
                 log.info(f"[CLAIMED] {video_id} channel={channel_handle}")
-                process(conn, video_id, payload, channel_handle, title)
+                try:
+                    process(conn, video_id, payload, channel_handle, title)
+                except Exception as e:
+                    log.error(f"Worker unhandled error for {video_id}: {e}", exc_info=True)
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    try:
+                        conn = psycopg2.connect(DB_URL, options="-c timezone=Asia/Jakarta")
+                    except Exception as ce:
+                        log.error(f"Reconnect failed: {ce}")
+                        time.sleep(5)
             else:
                 _shutdown.wait(POLL_INTERVAL)
     finally:
