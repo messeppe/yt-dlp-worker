@@ -25,6 +25,7 @@ MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "10"))
 MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "10"))
 MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "3"))
 MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
+RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
@@ -273,7 +274,7 @@ def get_streams(video_id: str):
         url,
         headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
         params={"id": video_id},
-        timeout=(10, 30),
+        timeout=(10, RAPIDAPI_TIMEOUT),
     )
     _update_quota_state(resp)  # read headers from ALL responses including 429
     resp.raise_for_status()
@@ -292,7 +293,7 @@ def get_subtitle_payload(video_id: str) -> dict:
         url,
         headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
         params={"id": video_id, "type": "vtt"},
-        timeout=(10, 30),
+        timeout=(10, RAPIDAPI_TIMEOUT),
     )
     _update_quota_state(resp)  # read headers before raise_for_status (captures 429 headers too)
     resp.raise_for_status()

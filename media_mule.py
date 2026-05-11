@@ -258,6 +258,17 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                 )
                 proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
 
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 403 and stream_attempt < 3:
+                sleep_s = min(2**stream_attempt, 15)
+                log.warning(
+                    f"[DOWNLOAD-403] {stream_name} proxy={proxy_idx} — may be IP block, swapping proxy, retrying in {sleep_s}s (attempt {stream_attempt}/{STREAM_MAX_RETRIES})"
+                )
+                time.sleep(sleep_s)
+                proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+                continue
+            raise
         except (
             requests.exceptions.ChunkedEncodingError,
             requests.exceptions.ConnectionError,
