@@ -2,6 +2,8 @@ services:
   yt-api-scout:
     build: .
     command: ["python", "-u", "scout.py"]
+    labels:
+      - traefik.enable=false
     environment:
       WORKER_ID: scout
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
@@ -22,6 +24,8 @@ services:
   yt-media-mule:
     build: .
     command: ["python", "-u", "media_mule.py"]
+    labels:
+      - traefik.enable=false
     environment:
       WORKER_ID: media-mule
       PROXY_URL: ${PROXY_URL}
@@ -47,6 +51,8 @@ services:
   yt-subtitle-mule:
     build: .
     command: ["python", "-u", "subtitle_mule.py"]
+    labels:
+      - traefik.enable=false
     environment:
       WORKER_ID: subtitle-mule
       PROXY_URL: ${PROXY_URL}
