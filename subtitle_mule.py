@@ -20,6 +20,7 @@ PROXY_URL = os.environ["PROXY_URL"]
 PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
+MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
 
 _WORKER_ID = os.environ.get("WORKER_ID", "subtitle-mule")
 logging.basicConfig(
@@ -80,7 +81,7 @@ def poll_job(conn):
                WHERE locked_until IS NOT NULL AND locked_until < NOW()
                  AND url_expires_at > NOW()"""
         )
-        # Delete expired URLs, reset videos to pending for re-scouting
+        # Delete expired URLs, reset videos to pending for re-scouting (cap at MAX_SCOUT_RETRIES)
         cur.execute(
             """DELETE FROM youtube.subtitle_queue
                WHERE url_expires_at <= NOW()
@@ -89,8 +90,22 @@ def poll_job(conn):
         expired = [r[0] for r in cur.fetchall()]
         if expired:
             cur.execute(
-                "UPDATE youtube.videos SET subtitle_status='pending' WHERE id=ANY(%s)",
-                (expired,),
+                """UPDATE youtube.videos
+                   SET subtitle_status = CASE
+                           WHEN subtitle_scout_retry_count >= %s THEN 'failed'
+                           ELSE 'pending'
+                       END,
+                       subtitle_last_error = CASE
+                           WHEN subtitle_scout_retry_count >= %s
+                           THEN 'Subtitle URL expired too many times'
+                           ELSE subtitle_last_error
+                       END,
+                       subtitle_scout_retry_count = CASE
+                           WHEN subtitle_scout_retry_count >= %s THEN subtitle_scout_retry_count
+                           ELSE subtitle_scout_retry_count + 1
+                       END
+                   WHERE id = ANY(%s)""",
+                (MAX_SCOUT_RETRIES, MAX_SCOUT_RETRIES, MAX_SCOUT_RETRIES, expired),
             )
         # Claim one job — soonest-to-expire first
         cur.execute(
@@ -141,7 +156,7 @@ def mark_complete(conn, video_id: str):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM youtube.subtitle_queue WHERE video_id = %s", (video_id,))
         cur.execute(
-            "UPDATE youtube.videos SET subtitle_status='completed' WHERE id=%s",
+            "UPDATE youtube.videos SET subtitle_status='completed', subtitle_scout_retry_count=0 WHERE id=%s",
             (video_id,),
         )
         conn.commit()

@@ -20,6 +20,7 @@ DB_URL = os.environ["SUPABASE_DB_URL"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
+MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
 STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "15"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
 
@@ -70,7 +71,7 @@ def poll_job(conn):
                WHERE locked_until IS NOT NULL AND locked_until < NOW()
                  AND url_expires_at > NOW()"""
         )
-        # Delete expired URLs, reset videos to queued for re-scouting
+        # Delete expired URLs, reset videos to queued for re-scouting (cap at MAX_SCOUT_RETRIES)
         cur.execute(
             """DELETE FROM youtube.media_queue
                WHERE url_expires_at <= NOW()
@@ -79,8 +80,22 @@ def poll_job(conn):
         expired = [r[0] for r in cur.fetchall()]
         if expired:
             cur.execute(
-                "UPDATE youtube.videos SET media_status='queued' WHERE id=ANY(%s)",
-                (expired,),
+                """UPDATE youtube.videos
+                   SET media_status = CASE
+                           WHEN scout_retry_count >= %s THEN 'failed'
+                           ELSE 'queued'
+                       END,
+                       media_last_error = CASE
+                           WHEN scout_retry_count >= %s
+                           THEN 'URL expired too many times — mule too slow to download before TTL'
+                           ELSE media_last_error
+                       END,
+                       scout_retry_count = CASE
+                           WHEN scout_retry_count >= %s THEN scout_retry_count
+                           ELSE scout_retry_count + 1
+                       END
+                   WHERE id = ANY(%s)""",
+                (MAX_SCOUT_RETRIES, MAX_SCOUT_RETRIES, MAX_SCOUT_RETRIES, expired),
             )
         # Claim one job — soonest-to-expire first
         cur.execute(
@@ -289,7 +304,7 @@ def mark_complete(conn, video_id: str, files: list):
             )
         cur.execute("DELETE FROM youtube.media_queue WHERE video_id = %s", (video_id,))
         cur.execute(
-            "UPDATE youtube.videos SET media_status='completed' WHERE id=%s",
+            "UPDATE youtube.videos SET media_status='completed', scout_retry_count=0 WHERE id=%s",
             (video_id,),
         )
         conn.commit()

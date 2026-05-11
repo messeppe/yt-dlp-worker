@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import signal
@@ -21,8 +22,9 @@ CIRCUIT_OPEN_THRESHOLD = int(os.environ.get("CIRCUIT_OPEN_THRESHOLD", "3"))
 CIRCUIT_SLEEP_BASE     = int(os.environ.get("CIRCUIT_SLEEP_BASE", "300"))
 MAX_MEDIA_QUEUE    = int(os.environ.get("MAX_MEDIA_QUEUE", "50"))
 MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "10"))
-MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "50"))
-MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "10"))
+MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "10"))
+MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "3"))
+MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
@@ -205,11 +207,13 @@ def poll_job(conn):
                 WHERE media_status = 'queued'
                   AND (stream_url_expires_at IS NULL
                        OR stream_url_expires_at < NOW() + INTERVAL '4 hours')
+                  AND scout_retry_count < %s
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING v.id
-            """
+            """,
+            (MAX_SCOUT_RETRIES,),
         )
         row = cur.fetchone()
         conn.commit()
@@ -248,11 +252,13 @@ def poll_subtitle_job(conn):
                 SELECT id FROM youtube.videos
                 WHERE subtitle_status = 'pending'
                   AND media_status = 'completed'
+                  AND subtitle_scout_retry_count < %s
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING v.id
-            """
+            """,
+            (MAX_SCOUT_RETRIES,),
         )
         row = cur.fetchone()
         conn.commit()
@@ -323,25 +329,61 @@ def pick_streams(results: list):
     return best_video(videos), sorted(audios, key=lambda r: r.get("quality", ""), reverse=True)[0]
 
 
+def _cdn_expiry(url: str) -> "datetime.datetime | None":
+    """Parse expire= from YouTube CDN URL. Returns UTC-aware datetime minus 5min buffer, or None."""
+    try:
+        qs = parse_qs(urlparse(url).query)
+        exp = int(qs.get("expire", [0])[0])
+        if exp > time.time() + 300:
+            return datetime.datetime.fromtimestamp(exp - 300, tz=datetime.timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
+def _queue_expiry(video_url: str, audio_url: "str | None") -> "datetime.datetime | None":
+    """Return MIN of video and audio CDN expiry. None if neither URL has expire= param."""
+    candidates = [_cdn_expiry(video_url)]
+    if audio_url:
+        candidates.append(_cdn_expiry(audio_url))
+    candidates = [c for c in candidates if c is not None]
+    return min(candidates) if candidates else None
+
+
+def _subtitle_expiry(results: dict) -> "datetime.datetime | None":
+    """Return CDN expiry from first available subtitle track URL."""
+    for key in ("subtitle", "automated_subtitle"):
+        for track in results.get(key, []):
+            url = track.get("url", "")
+            if url:
+                return _cdn_expiry(url)
+    return None
+
+
 def mark_ready(conn, video_id: str, video_url: str, audio_url: str) -> bool:
     """Insert into media_queue. Returns True if inserted/updated, False if queue full."""
+    exp_dt = _queue_expiry(video_url, audio_url)
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO youtube.media_queue
                    (video_id, video_stream_url, audio_stream_url, url_expires_at)
-               SELECT %s, %s, %s, NOW() + INTERVAL '6 hours'
+               SELECT %s, %s, %s, COALESCE(%s::timestamptz, NOW() + INTERVAL '6 hours')
                WHERE (SELECT COUNT(*) FROM youtube.media_queue) < %s
                ON CONFLICT (video_id) DO UPDATE SET
                    video_stream_url = EXCLUDED.video_stream_url,
                    audio_stream_url = EXCLUDED.audio_stream_url,
                    url_expires_at   = EXCLUDED.url_expires_at
                RETURNING id""",
-            (video_id, video_url, audio_url, MAX_MEDIA_QUEUE),
+            (video_id, video_url, audio_url, exp_dt, MAX_MEDIA_QUEUE),
         )
         inserted = cur.fetchone() is not None
         if inserted:
             cur.execute(
-                "UPDATE youtube.videos SET media_status='ready_for_download', media_locked_until=NULL WHERE id=%s",
+                """UPDATE youtube.videos
+                   SET media_status='ready_for_download',
+                       media_locked_until=NULL,
+                       scout_retry_count=0
+                   WHERE id=%s""",
                 (video_id,),
             )
         conn.commit()
@@ -364,21 +406,26 @@ def mark_failed(conn, video_id: str, error: str):
 
 def mark_subtitle_queued(conn, video_id: str, payload: dict) -> bool:
     """Insert into subtitle_queue. Returns True if inserted/updated, False if queue full."""
+    exp_dt = _subtitle_expiry(payload)
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO youtube.subtitle_queue (video_id, payload, url_expires_at)
-               SELECT %s, %s::jsonb, NOW() + INTERVAL '6 hours'
+               SELECT %s, %s::jsonb, COALESCE(%s::timestamptz, NOW() + INTERVAL '6 hours')
                WHERE (SELECT COUNT(*) FROM youtube.subtitle_queue) < %s
                ON CONFLICT (video_id) DO UPDATE SET
                    payload        = EXCLUDED.payload,
                    url_expires_at = EXCLUDED.url_expires_at
                RETURNING id""",
-            (video_id, json.dumps(payload), MAX_SUBTITLE_QUEUE),
+            (video_id, json.dumps(payload), exp_dt, MAX_SUBTITLE_QUEUE),
         )
         inserted = cur.fetchone() is not None
         if inserted:
             cur.execute(
-                "UPDATE youtube.videos SET subtitle_status='queued', subtitle_locked_until=NULL WHERE id=%s",
+                """UPDATE youtube.videos
+                   SET subtitle_status='queued',
+                       subtitle_locked_until=NULL,
+                       subtitle_scout_retry_count=0
+                   WHERE id=%s""",
                 (video_id,),
             )
         conn.commit()
