@@ -10,7 +10,7 @@ import time
 import boto3
 import psycopg2
 import requests
-from logging_setup import setup_logging
+from logging_setup import setup_logging, log_event
 
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
 S3_BUCKET = os.environ["S3_BUCKET"]
@@ -129,6 +129,7 @@ def poll_job(conn):
                 "UPDATE youtube.videos SET subtitle_status='processing' WHERE id=%s",
                 (row[0],),
             )
+            log_event(log, "info", "queue_claim", "Subtitle queue job claimed", worker="subtitle-mule", queue="youtube.subtitle_queue", video_id=row[0])
         conn.commit()
     if row:
         return row[0], row[1], row[2] or "unknown", row[3]
@@ -151,16 +152,19 @@ def renew_lock(conn, video_id: str, stop_event: threading.Event):
 def mark_complete(conn, video_id: str):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM youtube.subtitle_queue WHERE video_id = %s", (video_id,))
+        log_event(log, "info", "queue_dequeue", "Subtitle queue row removed", worker="subtitle-mule", queue="youtube.subtitle_queue", video_id=video_id, reason="completed")
         cur.execute(
             "UPDATE youtube.videos SET subtitle_status='completed', subtitle_scout_retry_count=0 WHERE id=%s",
             (video_id,),
         )
+        log_event(log, "info", "db_write", "Updated subtitle status completed", worker="subtitle-mule", table="youtube.videos", video_id=video_id, subtitle_status="completed")
         conn.commit()
 
 
 def mark_failed(conn, video_id: str, error: str):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM youtube.subtitle_queue WHERE video_id = %s", (video_id,))
+        log_event(log, "warning", "queue_dequeue", "Subtitle queue row removed", worker="subtitle-mule", queue="youtube.subtitle_queue", video_id=video_id, reason="failed")
         cur.execute(
             """UPDATE youtube.videos
             SET subtitle_status='failed',
@@ -168,6 +172,7 @@ def mark_failed(conn, video_id: str, error: str):
             WHERE id=%s""",
             (error[:500], video_id),
         )
+        log_event(log, "warning", "db_write", "Updated subtitle status failed", worker="subtitle-mule", table="youtube.videos", video_id=video_id, subtitle_status="failed", error=error[:200])
         conn.commit()
 
 
@@ -183,7 +188,7 @@ def requeue_to_queued(conn, video_id: str) -> None:
             (video_id,),
         )
         conn.commit()
-    log.info(f"[SUBTITLE-REQUEUE] {video_id} lock released, back in subtitle_queue")
+    log_event(log, "info", "queue_requeue", "Subtitle queue lock released", worker="subtitle-mule", queue="youtube.subtitle_queue", video_id=video_id, to_status="queued")
 
 
 def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_path):
@@ -199,6 +204,7 @@ def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_pat
         """,
             (video_id, language_code, is_automated, content, s3_path),
         )
+        log_event(log, "info", "db_write", "Upserted subtitle row", worker="subtitle-mule", table="youtube.subtitles", video_id=video_id, language_code=language_code, is_automated=bool(is_automated), s3_path=s3_path, content_bytes=len(content.encode("utf-8")))
         conn.commit()
 
 
@@ -344,7 +350,7 @@ def process(conn, video_id, payload, channel_handle, title):
                     s3.upload_file(
                         local, S3_BUCKET, s3_key, ExtraArgs={"ContentType": "text/vtt"}
                     )
-                    log.info(f"[S3] {video_id} lang={lang} → {s3_key}")
+                    log_event(log, "info", "s3_upload", "Uploaded subtitle to s3", worker="subtitle-mule", video_id=video_id, lang=lang, s3_bucket=S3_BUCKET, s3_path=s3_key)
 
                     upsert_subtitle(
                         conn, video_id, lang, track["is_automated"], content, s3_key

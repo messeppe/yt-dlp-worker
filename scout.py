@@ -10,7 +10,7 @@ from urllib.parse import urlparse, parse_qs
 import requests
 import psycopg2
 import psycopg2.pool
-from logging_setup import setup_logging
+from logging_setup import setup_logging, log_event
 
 DB_URL         = os.environ["SUPABASE_DB_URL"]
 RAPIDAPI_KEY   = os.environ["RAPIDAPI_KEY"]
@@ -162,7 +162,7 @@ def requeue(conn, video_id: str) -> None:
             (video_id,),
         )
         conn.commit()
-    log.info(f"[REQUEUE] {video_id} returned to queued (quota event, no retry increment)")
+    log_event(log, "info", "queue_requeue", "Media job requeued", worker="scout", queue="youtube.videos", video_id=video_id, to_status="queued")
 
 
 def requeue_subtitle(conn, video_id: str) -> None:
@@ -176,7 +176,7 @@ def requeue_subtitle(conn, video_id: str) -> None:
             (video_id,),
         )
         conn.commit()
-    log.info(f"[SUBTITLE-REQUEUE] {video_id} returned to pending (quota event)")
+    log_event(log, "info", "queue_requeue", "Subtitle job requeued", worker="scout", queue="youtube.videos", video_id=video_id, to_status="pending")
 
 
 def poll_job(conn):
@@ -266,6 +266,7 @@ def poll_subtitle_job(conn):
 
 def get_streams(video_id: str):
     url = f"https://{RAPIDAPI_HOST}/download.php"
+    log_event(log, "info", "api_call_start", "RapidAPI call started", worker="scout", endpoint="/download.php", video_id=video_id, provider="rapidapi")
     resp = requests.get(
         url,
         headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
@@ -273,6 +274,7 @@ def get_streams(video_id: str):
         timeout=(10, RAPIDAPI_TIMEOUT),
     )
     _update_quota_state(resp)  # read headers from ALL responses including 429
+    log_event(log, "info", "api_call_done", "RapidAPI call completed", worker="scout", endpoint="/download.php", video_id=video_id, provider="rapidapi", status=resp.status_code)
     resp.raise_for_status()
     data = resp.json()
     if "results" not in data:
@@ -285,6 +287,7 @@ def get_subtitle_payload(video_id: str) -> dict:
     Updates global quota state from response headers.
     Raises HTTPError on non-2xx. Caller must handle 429/5xx."""
     url = f"https://{RAPIDAPI_HOST}/subtitle.php"
+    log_event(log, "info", "api_call_start", "RapidAPI call started", worker="scout", endpoint="/subtitle.php", video_id=video_id, provider="rapidapi")
     resp = requests.get(
         url,
         headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": RAPIDAPI_HOST},
@@ -292,6 +295,7 @@ def get_subtitle_payload(video_id: str) -> dict:
         timeout=(10, RAPIDAPI_TIMEOUT),
     )
     _update_quota_state(resp)  # read headers before raise_for_status (captures 429 headers too)
+    log_event(log, "info", "api_call_done", "RapidAPI call completed", worker="scout", endpoint="/subtitle.php", video_id=video_id, provider="rapidapi", status=resp.status_code)
     resp.raise_for_status()
     return resp.json()
 
@@ -384,6 +388,8 @@ def mark_ready(conn, video_id: str, video_url: str, audio_url: str) -> bool:
                 (video_id,),
             )
         conn.commit()
+    if inserted:
+        log_event(log, "info", "queue_enqueue", "Media queued for mule", worker="scout", queue="youtube.media_queue", video_id=video_id, has_audio=bool(audio_url))
     return inserted
 
 
@@ -399,6 +405,7 @@ def mark_failed(conn, video_id: str, error: str):
             (error[:500], video_id),
         )
         conn.commit()
+    log_event(log, "warning", "db_write", "Media marked failed", worker="scout", table="youtube.videos", video_id=video_id, media_status="failed", error=error[:200])
 
 
 def mark_subtitle_queued(conn, video_id: str, payload: dict) -> bool:
@@ -427,7 +434,7 @@ def mark_subtitle_queued(conn, video_id: str, payload: dict) -> bool:
             )
         conn.commit()
     if inserted:
-        log.info(f"[SUBTITLE-CACHED] {video_id} subtitle payload stored, ready for subtitle mule")
+        log_event(log, "info", "queue_enqueue", "Subtitle payload queued for mule", worker="scout", queue="youtube.subtitle_queue", video_id=video_id)
     return inserted
 
 
@@ -443,7 +450,7 @@ def mark_subtitle_no_captions(conn, video_id: str) -> None:
             (video_id,),
         )
         conn.commit()
-    log.info(f"[SUBTITLE-NONE] {video_id} no captions available — marked completed")
+    log_event(log, "info", "db_write", "Subtitle marked completed (no captions)", worker="scout", table="youtube.videos", video_id=video_id, subtitle_status="completed")
 
 
 def mark_subtitle_failed(conn, video_id: str, error: str) -> None:
@@ -459,7 +466,7 @@ def mark_subtitle_failed(conn, video_id: str, error: str) -> None:
             (error[:500], video_id),
         )
         conn.commit()
-    log.warning(f"[SUBTITLE-FAIL] {video_id}: {error}")
+    log_event(log, "warning", "db_write", "Subtitle marked failed", worker="scout", table="youtube.videos", video_id=video_id, subtitle_status="failed", error=error[:200])
 
 
 def process(conn, video_id: str):
@@ -664,6 +671,7 @@ def main():
                 if not _media_paused:
                     video_id = poll_job(conn)
                     if video_id:
+                        log_event(log, "info", "queue_claim", "Media job claimed", worker="scout", queue="youtube.videos", video_id=video_id, media_status="processing")
                         process(conn, video_id)
                         continue
 
@@ -671,6 +679,7 @@ def main():
                 if not _subtitle_paused:
                     video_id = poll_subtitle_job(conn)
                     if video_id:
+                        log_event(log, "info", "queue_claim", "Subtitle job claimed", worker="scout", queue="youtube.videos", video_id=video_id, subtitle_status="processing")
                         process_subtitle(conn, video_id)
                         continue
 

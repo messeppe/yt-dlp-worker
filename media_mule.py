@@ -10,7 +10,7 @@ import boto3
 import psycopg2
 import psycopg2.pool
 import requests
-from logging_setup import setup_logging
+from logging_setup import setup_logging, log_event
 
 PROXY_URL = os.environ["PROXY_URL"]
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
@@ -120,6 +120,7 @@ def poll_job(conn):
                 "UPDATE youtube.videos SET media_status='processing' WHERE id=%s",
                 (row[0],),
             )
+            log_event(log, "info", "queue_claim", "Media queue job claimed", worker="media-mule", queue="youtube.media_queue", video_id=row[0])
         conn.commit()
     if row:
         return row[0], row[1], row[2], row[3] or "unknown", row[4]
@@ -192,7 +193,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
     downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
     total = 0
     stream_name = os.path.basename(dest)
-    next_pct_log = 5.0
+    next_pct_log = 10.0
     proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
 
     for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
@@ -234,7 +235,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                         f.write(chunk)
                         downloaded += len(chunk)
                         now = time.time()
-                        if now - last_log >= 15.0:
+                        if now - last_log >= 30.0:
                             elapsed = max(now - start, 0.001)
                             speed = downloaded / elapsed
                             if total > 0:
@@ -244,7 +245,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                                         f"[DOWNLOAD] {stream_name} {render_progress_bar(pct)} {pct:.1f}% {format_bytes(downloaded)}/{format_bytes(total)} speed={format_bytes(speed)}/s"
                                     )
                                     while next_pct_log <= pct:
-                                        next_pct_log += 5.0
+                                        next_pct_log += 10.0
                             last_log = now
 
                 if total == 0 or downloaded >= total:
@@ -309,17 +310,21 @@ def mark_complete(conn, video_id: str, files: list):
                     mime_type,
                 ),
             )
+            log_event(log, "info", "db_write", "Inserted media_files row", worker="media-mule", table="youtube.media_files", video_id=video_id, media_type=media_type, s3_path=s3_path, file_size_bytes=file_size, mime_type=mime_type)
         cur.execute("DELETE FROM youtube.media_queue WHERE video_id = %s", (video_id,))
+        log_event(log, "info", "queue_dequeue", "Media queue row removed", worker="media-mule", queue="youtube.media_queue", video_id=video_id, reason="completed")
         cur.execute(
             "UPDATE youtube.videos SET media_status='completed', scout_retry_count=0 WHERE id=%s",
             (video_id,),
         )
+        log_event(log, "info", "db_write", "Updated media status completed", worker="media-mule", table="youtube.videos", video_id=video_id, media_status="completed")
         conn.commit()
 
 
 def mark_failed(conn, video_id: str, error: str):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM youtube.media_queue WHERE video_id = %s", (video_id,))
+        log_event(log, "warning", "queue_dequeue", "Media queue row removed", worker="media-mule", queue="youtube.media_queue", video_id=video_id, reason="failed")
         cur.execute(
             """UPDATE youtube.videos
                SET media_status='failed',
@@ -328,6 +333,7 @@ def mark_failed(conn, video_id: str, error: str):
                WHERE id=%s""",
             (error[:500], video_id),
         )
+        log_event(log, "warning", "db_write", "Updated media status failed", worker="media-mule", table="youtube.videos", video_id=video_id, media_status="failed", error=error[:200])
         conn.commit()
 
 
@@ -343,7 +349,7 @@ def requeue_to_ready(conn, video_id: str) -> None:
                 (video_id,),
             )
             conn.commit()
-    log.info(f"[REQUEUE] {video_id} lock released, back in media_queue")
+    log_event(log, "info", "queue_requeue", "Media queue lock released", worker="media-mule", queue="youtube.media_queue", video_id=video_id, to_status="ready_for_download")
 
 
 def process(
@@ -372,6 +378,7 @@ def process(
                 size = os.path.getsize(local)
                 key = f"youtube/{safe_channel}/{safe_title}_{video_id}.{ext}"
                 s3.upload_file(local, S3_BUCKET, key)
+                log_event(log, "info", "s3_upload", "Uploaded media to s3", worker="media-mule", video_id=video_id, s3_bucket=S3_BUCKET, s3_path=key, media_type="video")
                 uploaded.append((key, size, "video", "video/mp4"))
             else:  # Separate
                 vext = infer_stream_ext(v_url, "mp4")
@@ -390,6 +397,8 @@ def process(
                 akey = f"youtube/{safe_channel}/{safe_title}_{video_id}_a.{aext}"
                 s3.upload_file(vlocal, S3_BUCKET, vkey)
                 s3.upload_file(alocal, S3_BUCKET, akey)
+                log_event(log, "info", "s3_upload", "Uploaded media to s3", worker="media-mule", video_id=video_id, s3_bucket=S3_BUCKET, s3_path=vkey, media_type="video")
+                log_event(log, "info", "s3_upload", "Uploaded media to s3", worker="media-mule", video_id=video_id, s3_bucket=S3_BUCKET, s3_path=akey, media_type="audio")
                 uploaded.append((vkey, vsize, "video", "video/mp4"))
                 uploaded.append((akey, asize, "audio", "audio/m4a"))
 

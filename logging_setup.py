@@ -49,6 +49,9 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
+        fields = getattr(record, "fields", None)
+        if isinstance(fields, dict):
+            payload.update(fields)
 
         if record.exc_info:
             payload["error.type"] = record.exc_info[0].__name__
@@ -69,3 +72,8 @@ def setup_logging(service_name: str) -> logging.Logger:
     logger.addHandler(handler)
     logger.propagate = False
     return logger
+
+
+def log_event(logger: logging.Logger, level: str, event: str, message: str, **fields) -> None:
+    lvl = getattr(logging, level.upper(), logging.INFO)
+    logger.log(lvl, message, extra={"event": event, "fields": fields})
