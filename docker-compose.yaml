@@ -4,6 +4,8 @@ services:
     command: python scout.py
     labels:
       - traefik.enable=false
+      - app=videomasjid
+      - service=yt-scout
     environment:
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
@@ -17,16 +19,18 @@ services:
       PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
     restart: unless-stopped
     logging:
-      driver: loki
+      driver: json-file
       options:
-        loki-url: "http://localhost:3100/loki/api/v1/push"
-        loki-external-labels: "service=yt-scout,app=videomasjid"
+        max-size: "50m"
+        max-file: "5"
 
   yt-media-mule:
     build: .
     command: python media_mule.py
     labels:
       - traefik.enable=false
+      - app=videomasjid
+      - service=yt-media-mule
     environment:
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
@@ -47,16 +51,18 @@ services:
     tmpfs:
       - /tmp
     logging:
-      driver: loki
+      driver: json-file
       options:
-        loki-url: "http://localhost:3100/loki/api/v1/push"
-        loki-external-labels: "service=yt-media-mule,app=videomasjid"
+        max-size: "50m"
+        max-file: "5"
 
   yt-subtitle-mule:
     build: .
     command: python subtitle_mule.py
     labels:
       - traefik.enable=false
+      - app=videomasjid
+      - service=yt-subtitle-mule
     environment:
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
@@ -78,7 +84,7 @@ services:
     tmpfs:
       - /tmp
     logging:
-      driver: loki
+      driver: json-file
       options:
-        loki-url: "http://localhost:3100/loki/api/v1/push"
-        loki-external-labels: "service=yt-subtitle-mule,app=videomasjid"
+        max-size: "50m"
+        max-file: "5"
