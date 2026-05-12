@@ -204,7 +204,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
 
     for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
         proxies = pool.make_proxies(proxy_idx)
-        headers = {}
+        headers = {"Accept-Encoding": "identity"}
         if downloaded > 0:
             headers["Range"] = f"bytes={downloaded}-"
 
@@ -235,7 +235,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
 
                 mode = "ab" if downloaded > 0 else "wb"
                 with open(dest, mode) as f:
-                    for chunk in r.iter_content(chunk_size=65536):
+                    for chunk in r.iter_content(chunk_size=1048576):
                         if not chunk:
                             continue
                         f.write(chunk)
