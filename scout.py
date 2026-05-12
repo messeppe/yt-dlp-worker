@@ -4,12 +4,10 @@ import os
 import signal
 import threading
 import time
-import logging
 from urllib.parse import urlparse, parse_qs
 
 import requests
 import psycopg2
-import psycopg2.pool
 from logging_setup import setup_logging, log_event
 
 DB_URL         = os.environ["SUPABASE_DB_URL"]
@@ -19,8 +17,9 @@ POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_VIDEO_QUALITY = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
 LOW_QUOTA_THRESHOLD    = int(os.environ.get("LOW_QUOTA_THRESHOLD", "100"))
 HARD_QUOTA_THRESHOLD   = int(os.environ.get("HARD_QUOTA_THRESHOLD", "20"))
-CIRCUIT_OPEN_THRESHOLD = int(os.environ.get("CIRCUIT_OPEN_THRESHOLD", "3"))
+CIRCUIT_OPEN_THRESHOLD = int(os.environ.get("CIRCUIT_OPEN_THRESHOLD", "5"))
 CIRCUIT_SLEEP_BASE     = int(os.environ.get("CIRCUIT_SLEEP_BASE", "300"))
+CIRCUIT_RESET_AFTER    = int(os.environ.get("CIRCUIT_RESET_AFTER", "3600"))
 MAX_MEDIA_QUEUE    = int(os.environ.get("MAX_MEDIA_QUEUE", "50"))
 MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "10"))
 MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "50"))
@@ -38,6 +37,7 @@ log = setup_logging(_WORKER_ID)
 _quota_remaining: int | None = None
 _quota_reset_at: int = 0  # Unix timestamp when quota window resets
 _consecutive_api_failures: int = 0
+_circuit_opened_at: float = 0.0  # time.time() when circuit first opened; 0 = closed
 _media_paused: bool = False
 _subtitle_paused: bool = False
 
@@ -99,20 +99,23 @@ def _circuit_sleep_seconds() -> int:
 
 
 def _on_api_success() -> None:
-    global _consecutive_api_failures
+    global _consecutive_api_failures, _circuit_opened_at
     if _consecutive_api_failures > 0:
         log.info(f"[CIRCUIT-CLOSE] RapidAPI recovered after {_consecutive_api_failures} consecutive failures")
     _consecutive_api_failures = 0
+    _circuit_opened_at = 0.0
 
 
 def _on_api_failure() -> None:
-    global _consecutive_api_failures
+    global _consecutive_api_failures, _circuit_opened_at
     _consecutive_api_failures += 1
     if _circuit_open():
-        log.warning(
-            f"[CIRCUIT-OPEN] {_consecutive_api_failures} consecutive RapidAPI failures "
-            f"— halting scout for {_circuit_sleep_seconds()}s"
-        )
+        if _circuit_opened_at == 0.0:
+            _circuit_opened_at = time.time()
+            log.warning(
+                f"[CIRCUIT-OPEN] {_consecutive_api_failures} consecutive RapidAPI failures "
+                f"— stopping API calls, will probe again in {CIRCUIT_RESET_AFTER}s"
+            )
 
 
 def persist_quota(conn) -> None:
@@ -264,6 +267,10 @@ def poll_subtitle_job(conn):
     return None
 
 
+class TransientAPIError(Exception):
+    """API returned HTTP 200 but body signals a transient error (e.g. 'try again!')."""
+
+
 def get_streams(video_id: str):
     url = f"https://{RAPIDAPI_HOST}/download.php"
     log_event(log, "info", "api_call_start", "RapidAPI call started", worker="scout", endpoint="/download.php", video_id=video_id, provider="rapidapi")
@@ -277,6 +284,9 @@ def get_streams(video_id: str):
     log_event(log, "info", "api_call_done", "RapidAPI call completed", worker="scout", endpoint="/download.php", video_id=video_id, provider="rapidapi", status=resp.status_code)
     resp.raise_for_status()
     data = resp.json()
+    if data.get("status") == "error":
+        msg = data.get("message") or data.get("msg") or "unknown error"
+        raise TransientAPIError(f"API body status=error: {msg}")
     if "results" not in data:
         log.warning(f"[API-WARN] {video_id}: no 'results' key — status={data.get('status_code')}")
     return data.get("title", ""), data.get("results", [])
@@ -297,7 +307,11 @@ def get_subtitle_payload(video_id: str) -> dict:
     _update_quota_state(resp)  # read headers before raise_for_status (captures 429 headers too)
     log_event(log, "info", "api_call_done", "RapidAPI call completed", worker="scout", endpoint="/subtitle.php", video_id=video_id, provider="rapidapi", status=resp.status_code)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    if data.get("status") == "error":
+        msg = data.get("message") or data.get("msg") or "unknown error"
+        raise TransientAPIError(f"API body status=error: {msg}")
+    return data
 
 
 def pick_streams(results: list):
@@ -523,6 +537,13 @@ def process(conn, video_id: str):
         mark_failed(conn, video_id, f"RapidAPI HTTP {status}")
         log.warning(f"[FAIL] {video_id}: RapidAPI HTTP {status}", exc_info=True)
         return
+    except TransientAPIError as e:
+        _on_api_failure()
+        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
+        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, sleeping {sleep_s}s")
+        requeue(conn, video_id)
+        _shutdown.wait(sleep_s)
+        return
     except (requests.ConnectionError, requests.Timeout) as e:
         _on_api_failure()
         sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
@@ -608,6 +629,13 @@ def process_subtitle(conn, video_id: str) -> None:
             return
         mark_subtitle_failed(conn, video_id, f"RapidAPI /subtitle.php HTTP {status}")
         return
+    except TransientAPIError as e:
+        _on_api_failure()
+        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
+        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, sleeping {sleep_s}s")
+        requeue_subtitle(conn, video_id)
+        _shutdown.wait(sleep_s)
+        return
     except (requests.ConnectionError, requests.Timeout) as e:
         _on_api_failure()
         sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
@@ -644,7 +672,7 @@ def process_subtitle(conn, video_id: str) -> None:
 
 
 def main():
-    global _media_paused, _subtitle_paused
+    global _media_paused, _subtitle_paused, _consecutive_api_failures, _circuit_opened_at
     log.info("Scout started — polling for media (queued) and subtitle (pending) jobs...")
     while True:
         try:
@@ -667,21 +695,39 @@ def main():
                     _subtitle_paused = False
 
             try:
-                # Priority 1: media jobs (queued → ready_for_download) — skip if paused
+                # Circuit check — API detected down; block all polling until probe window
+                if _circuit_open():
+                    elapsed = time.time() - _circuit_opened_at
+                    remaining = max(0, CIRCUIT_RESET_AFTER - elapsed)
+                    if remaining > 0:
+                        log.info(f"[CIRCUIT-OPEN] API down — no polling, probe in {remaining:.0f}s")
+                        _shutdown.wait(min(remaining, 60))
+                        continue
+                    else:
+                        log.info(f"[CIRCUIT-PROBE] {CIRCUIT_RESET_AFTER}s elapsed — resetting circuit for probe")
+                        _consecutive_api_failures = 0
+                        _circuit_opened_at = 0.0
+
+                did_work = False
+
+                # Media jobs (queued → ready_for_download)
                 if not _media_paused:
                     video_id = poll_job(conn)
                     if video_id:
                         log_event(log, "info", "queue_claim", "Media job claimed", worker="scout", queue="youtube.videos", video_id=video_id, media_status="processing")
                         process(conn, video_id)
-                        continue
+                        did_work = True
 
-                # Priority 2: subtitle jobs (pending → queued payload stored) — skip if paused
+                # Subtitle jobs — run every iteration so subtitle never starves behind media
                 if not _subtitle_paused:
                     video_id = poll_subtitle_job(conn)
                     if video_id:
                         log_event(log, "info", "queue_claim", "Subtitle job claimed", worker="scout", queue="youtube.videos", video_id=video_id, subtitle_status="processing")
                         process_subtitle(conn, video_id)
-                        continue
+                        did_work = True
+
+                if did_work:
+                    continue
 
             except Exception as e:
                 log.error(f"Scout poll error: {e} — reconnecting", exc_info=True)
