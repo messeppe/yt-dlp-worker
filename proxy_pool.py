@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import threading
 import time
 
@@ -8,10 +9,11 @@ PROXY_COOLDOWN = int(os.environ.get("PROXY_COOLDOWN", "60"))
 
 
 class ProxyPool:
-    def __init__(self, url_template: str, size: int, name: str = "proxy"):
+    def __init__(self, url_template: str, size: int, name: str = "proxy", base_port: int = 0):
         self.url_template = url_template
         self.size = size
         self.name = name
+        self.base_port = base_port  # non-zero = port-based sticky (e.g. Decodo :10001-:10100)
         self._cooldowns: dict[int, float] = {}
         self._lock = threading.Lock()
 
@@ -34,11 +36,14 @@ class ProxyPool:
             self._cooldowns[idx] = time.time() + cooldown_secs
 
     def make_proxies(self, idx: int) -> dict:
-        url = (
-            self.url_template.replace("-rotate", f"-{idx}", 1)
-            if "-rotate" in self.url_template
-            else self.url_template
-        )
+        if self.base_port:
+            # Port-based sticky (Decodo): swap port to base_port + idx
+            url = re.sub(r":\d+$", f":{self.base_port + idx}", self.url_template)
+        elif "-rotate" in self.url_template:
+            # Subdomain-based sticky (Webshare): -rotate -> -N
+            url = self.url_template.replace("-rotate", f"-{idx}", 1)
+        else:
+            url = self.url_template
         return {"http": url, "https": url}
 
 
@@ -47,7 +52,8 @@ def build_pools() -> tuple["ProxyPool", "ProxyPool | None"]:
     primary = ProxyPool(
         url_template=os.environ["PROXY_URL"],
         size=int(os.environ.get("PROXY_POOL_SIZE", "100")),
-        name="webshare",
+        name=os.environ.get("PROXY_NAME", "proxy"),
+        base_port=int(os.environ.get("PROXY_BASE_PORT", "0")),
     )
     secondary = None
     if os.environ.get("PROXY_B_URL"):
@@ -55,6 +61,7 @@ def build_pools() -> tuple["ProxyPool", "ProxyPool | None"]:
             url_template=os.environ["PROXY_B_URL"],
             size=int(os.environ.get("PROXY_B_POOL_SIZE", "100")),
             name=os.environ.get("PROXY_B_NAME", "proxy-b"),
+            base_port=int(os.environ.get("PROXY_B_BASE_PORT", "0")),
         )
     return primary, secondary
 
