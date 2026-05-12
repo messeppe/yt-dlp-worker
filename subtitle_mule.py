@@ -1,6 +1,5 @@
 import logging
 import os
-import random
 import re
 import signal
 import tempfile
@@ -11,17 +10,18 @@ import boto3
 import psycopg2
 import requests
 from logging_setup import setup_logging, log_event
+from proxy_pool import build_pools, pick_pool
 
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
 S3_BUCKET = os.environ["S3_BUCKET"]
 S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 DB_URL = os.environ["SUPABASE_DB_URL"]
-PROXY_URL = os.environ["PROXY_URL"]
-PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
 MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
+
+_proxy_pool, _proxy_pool_b = build_pools()
 
 _WORKER_ID = os.environ.get("WORKER_ID", "subtitle-mule")
 log = setup_logging(_WORKER_ID)
@@ -36,14 +36,6 @@ def handle_sigterm(signum, frame):
 
 signal.signal(signal.SIGTERM, handle_sigterm)
 
-
-def make_sticky_proxy(n: int) -> dict:
-    url = (
-        PROXY_URL.replace("-rotate", f"-{n}", 1)
-        if "-rotate" in PROXY_URL
-        else PROXY_URL
-    )
-    return {"http": url, "https": url}
 
 
 def sanitize_filename(s: str) -> str:
@@ -257,9 +249,10 @@ def download_vtt(url: str, video_id: str = "", lang: str = "", worker_idx: str =
     - Gives up after MAX_RETRIES attempts
     """
     last_error = None
+    pool = pick_pool(_proxy_pool, _proxy_pool_b)
     for attempt in range(1, MAX_RETRIES + 1):
-        proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
-        proxies = make_sticky_proxy(proxy_idx)
+        proxy_idx = pool.pick()
+        proxies = pool.make_proxies(proxy_idx)
         log.info(
             f"[DOWNLOAD] {video_id} lang={lang} proxy={proxy_idx} attempt={attempt}/{MAX_RETRIES}"
         )
@@ -293,7 +286,9 @@ def download_vtt(url: str, video_id: str = "", lang: str = "", worker_idx: str =
                 log.warning(
                     f"[DOWNLOAD-RETRY] {video_id} lang={lang} proxy={proxy_idx} 429 rate-limited — backing off {sleep_s}s (attempt {attempt}/{MAX_RETRIES})"
                 )
+                pool.mark_failed(proxy_idx)
                 time.sleep(sleep_s)
+                pool = pick_pool(_proxy_pool, _proxy_pool_b)
                 continue
             elif status >= 500:
                 sleep_s = min(2**attempt, 15)
@@ -313,7 +308,9 @@ def download_vtt(url: str, video_id: str = "", lang: str = "", worker_idx: str =
             log.warning(
                 f"[DOWNLOAD-RETRY] {video_id} lang={lang} proxy={proxy_idx} connection error: {e} — backing off {sleep_s}s (attempt {attempt}/{MAX_RETRIES})"
             )
+            pool.mark_failed(proxy_idx, cooldown_secs=30)
             time.sleep(sleep_s)
+            pool = pick_pool(_proxy_pool, _proxy_pool_b)
             continue
     raise ConnectionError(
         f"failed to download VTT after {MAX_RETRIES} attempts: {last_error}"

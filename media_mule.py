@@ -1,6 +1,5 @@
 import logging
 import os
-import random
 import signal
 import threading
 import time
@@ -11,19 +10,20 @@ import psycopg2
 import psycopg2.pool
 import requests
 from logging_setup import setup_logging, log_event
+from proxy_pool import build_pools, pick_pool
 
-PROXY_URL = os.environ["PROXY_URL"]
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
 S3_BUCKET = os.environ["S3_BUCKET"]
 S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 DB_URL = os.environ["SUPABASE_DB_URL"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
-PROXY_POOL_SIZE = int(os.environ.get("PROXY_POOL_SIZE", "100"))
 MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
 MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
 STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "15"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
+
+_proxy_pool, _proxy_pool_b = build_pools()
 
 _WORKER_ID = os.environ.get("WORKER_ID", "media-mule")
 log = setup_logging(_WORKER_ID)
@@ -39,13 +39,6 @@ def handle_sigterm(signum, frame):
 signal.signal(signal.SIGTERM, handle_sigterm)
 
 
-def make_sticky_proxy(n: int) -> dict:
-    url = (
-        PROXY_URL.replace("-rotate", f"-{n}", 1)
-        if "-rotate" in PROXY_URL
-        else PROXY_URL
-    )
-    return {"http": url, "https": url}
 
 
 def get_s3():
@@ -205,11 +198,12 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
     downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
     total = 0
     stream_name = os.path.basename(dest)
-    proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+    pool = pick_pool(_proxy_pool, _proxy_pool_b)
+    proxy_idx = pool.pick()
     proxy_rotations = 0
 
     for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
-        proxies = make_sticky_proxy(proxy_idx)
+        proxies = pool.make_proxies(proxy_idx)
         headers = {}
         if downloaded > 0:
             headers["Range"] = f"bytes={downloaded}-"
@@ -268,7 +262,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                 log.warning(
                     f"[DOWNLOAD-RETRY] {stream_name} ended cleanly early at {format_bytes(downloaded)}; retrying"
                 )
-                proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+                proxy_idx = pool.pick()
                 proxy_rotations += 1
 
         except requests.exceptions.HTTPError as e:
@@ -278,8 +272,10 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                 log.warning(
                     f"[DOWNLOAD-403] {stream_name} proxy={proxy_idx} — may be IP block, swapping proxy, retrying in {sleep_s}s (attempt {stream_attempt}/{STREAM_MAX_RETRIES})"
                 )
+                pool.mark_failed(proxy_idx)
                 time.sleep(sleep_s)
-                proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+                pool = pick_pool(_proxy_pool, _proxy_pool_b)
+                proxy_idx = pool.pick()
                 proxy_rotations += 1
                 continue
             raise
@@ -294,8 +290,10 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
             log.warning(
                 f"[DOWNLOAD-CRASH] {stream_name} proxy={proxy_idx} died at {format_bytes(downloaded)} bytes: {e} — swapping proxy and backing off {sleep_s}s"
             )
+            pool.mark_failed(proxy_idx, cooldown_secs=30)
             time.sleep(sleep_s)
-            proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+            pool = pick_pool(_proxy_pool, _proxy_pool_b)
+            proxy_idx = pool.pick()
             proxy_rotations += 1
             continue
 
