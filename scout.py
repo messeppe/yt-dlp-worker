@@ -36,8 +36,14 @@ log = setup_logging(_WORKER_ID)
 # None = state unknown (no successful call yet or headers absent).
 _quota_remaining: int | None = None
 _quota_reset_at: int = 0  # Unix timestamp when quota window resets
-_consecutive_api_failures: int = 0
-_circuit_opened_at: float = 0.0  # time.time() when circuit first opened; 0 = closed
+_media_failures: int = 0
+_media_circuit_opened_at: float = 0.0
+_media_blocked_until: float = 0.0   # epoch; media pipeline skipped until this passes
+
+_subtitle_failures: int = 0
+_subtitle_circuit_opened_at: float = 0.0
+_subtitle_blocked_until: float = 0.0  # epoch; subtitle pipeline skipped until this passes
+
 _media_paused: bool = False
 _subtitle_paused: bool = False
 
@@ -89,33 +95,55 @@ def _quota_sleep_seconds() -> int:
     return 0  # reset already passed — quota likely refreshed
 
 
-def _circuit_open() -> bool:
-    return _consecutive_api_failures >= CIRCUIT_OPEN_THRESHOLD
+def _media_circuit_open() -> bool:
+    return _media_failures >= CIRCUIT_OPEN_THRESHOLD
 
 
-def _circuit_sleep_seconds() -> int:
-    excess = max(_consecutive_api_failures - CIRCUIT_OPEN_THRESHOLD, 0)
+def _subtitle_circuit_open() -> bool:
+    return _subtitle_failures >= CIRCUIT_OPEN_THRESHOLD
+
+
+def _circuit_sleep_seconds(failures: int) -> int:
+    excess = max(failures - CIRCUIT_OPEN_THRESHOLD, 0)
     return min(CIRCUIT_SLEEP_BASE * (2 ** excess), 3600)
 
 
-def _on_api_success() -> None:
-    global _consecutive_api_failures, _circuit_opened_at
-    if _consecutive_api_failures > 0:
-        log.info(f"[CIRCUIT-CLOSE] RapidAPI recovered after {_consecutive_api_failures} consecutive failures")
-    _consecutive_api_failures = 0
-    _circuit_opened_at = 0.0
+def _on_media_success() -> None:
+    global _media_failures, _media_circuit_opened_at
+    if _media_failures > 0:
+        log.info(f"[MEDIA-CIRCUIT-CLOSE] recovered after {_media_failures} consecutive failures")
+    _media_failures = 0
+    _media_circuit_opened_at = 0.0
 
 
-def _on_api_failure() -> None:
-    global _consecutive_api_failures, _circuit_opened_at
-    _consecutive_api_failures += 1
-    if _circuit_open():
-        if _circuit_opened_at == 0.0:
-            _circuit_opened_at = time.time()
-            log.warning(
-                f"[CIRCUIT-OPEN] {_consecutive_api_failures} consecutive RapidAPI failures "
-                f"— stopping API calls, will probe again in {CIRCUIT_RESET_AFTER}s"
-            )
+def _on_media_failure() -> None:
+    global _media_failures, _media_circuit_opened_at
+    _media_failures += 1
+    if _media_circuit_open() and _media_circuit_opened_at == 0.0:
+        _media_circuit_opened_at = time.time()
+        log.warning(
+            f"[MEDIA-CIRCUIT-OPEN] {_media_failures} consecutive failures "
+            f"— pausing media scout, probe in {CIRCUIT_RESET_AFTER}s"
+        )
+
+
+def _on_subtitle_success() -> None:
+    global _subtitle_failures, _subtitle_circuit_opened_at
+    if _subtitle_failures > 0:
+        log.info(f"[SUBTITLE-CIRCUIT-CLOSE] recovered after {_subtitle_failures} consecutive failures")
+    _subtitle_failures = 0
+    _subtitle_circuit_opened_at = 0.0
+
+
+def _on_subtitle_failure() -> None:
+    global _subtitle_failures, _subtitle_circuit_opened_at
+    _subtitle_failures += 1
+    if _subtitle_circuit_open() and _subtitle_circuit_opened_at == 0.0:
+        _subtitle_circuit_opened_at = time.time()
+        log.warning(
+            f"[SUBTITLE-CIRCUIT-OPEN] {_subtitle_failures} consecutive failures "
+            f"— pausing subtitle scout, probe in {CIRCUIT_RESET_AFTER}s"
+        )
 
 
 def persist_quota(conn) -> None:
@@ -484,15 +512,16 @@ def mark_subtitle_failed(conn, video_id: str, error: str) -> None:
 
 
 def process(conn, video_id: str):
+    global _media_blocked_until
     # Pre-call quota guard
     sleep_s = _quota_sleep_seconds()
     if sleep_s > 0:
         log.warning(
             f"[QUOTA-GUARD] remaining={_quota_remaining} ≤ {HARD_QUOTA_THRESHOLD} "
-            f"— requeuing {video_id}, sleeping {sleep_s}s until reset"
+            f"— requeuing {video_id}, blocking media {sleep_s}s until reset"
         )
         requeue(conn, video_id)
-        _shutdown.wait(sleep_s)
+        _media_blocked_until = time.time() + sleep_s
         return
 
     delay = _adaptive_delay()
@@ -512,44 +541,44 @@ def process(conn, video_id: str):
     try:
         title, results = get_streams(video_id)
         persist_quota(conn)
-        _on_api_success()
+        _on_media_success()
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         persist_quota(conn)
         if status == 429:
             sleep_s = max(_quota_reset_at - int(time.time()), 3600) if _quota_reset_at else 3600
-            log.warning(f"[429] {video_id}: quota hit — requeuing, sleeping {sleep_s}s")
+            log.warning(f"[429] {video_id}: quota hit — requeuing, blocking media {sleep_s}s")
             requeue(conn, video_id)
-            _shutdown.wait(sleep_s)
+            _media_blocked_until = time.time() + sleep_s
             return
         if status == 407:
-            log.warning(f"[407] {video_id}: proxy auth failure — requeuing, backing off 60s")
+            log.warning(f"[407] {video_id}: proxy auth failure — requeuing, blocking media 60s")
             requeue(conn, video_id)
-            _shutdown.wait(60)
+            _media_blocked_until = time.time() + 60
             return
         if status in (500, 502, 503, 504):
-            _on_api_failure()
-            sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
-            log.warning(f"[5XX] {video_id}: RapidAPI {status} — requeuing, sleeping {sleep_s}s")
+            _on_media_failure()
+            sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
+            log.warning(f"[5XX] {video_id}: RapidAPI {status} — requeuing, blocking media {sleep_s}s")
             requeue(conn, video_id)
-            _shutdown.wait(sleep_s)
+            _media_blocked_until = time.time() + sleep_s
             return
         mark_failed(conn, video_id, f"RapidAPI HTTP {status}")
         log.warning(f"[FAIL] {video_id}: RapidAPI HTTP {status}", exc_info=True)
         return
     except TransientAPIError as e:
-        _on_api_failure()
-        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
-        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, sleeping {sleep_s}s")
+        _on_media_failure()
+        sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
+        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
         requeue(conn, video_id)
-        _shutdown.wait(sleep_s)
+        _media_blocked_until = time.time() + sleep_s
         return
     except (requests.ConnectionError, requests.Timeout) as e:
-        _on_api_failure()
-        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
-        log.warning(f"[CONN-ERR] {video_id}: {e} — requeuing, sleeping {sleep_s}s")
+        _on_media_failure()
+        sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
+        log.warning(f"[CONN-ERR] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
         requeue(conn, video_id)
-        _shutdown.wait(sleep_s)
+        _media_blocked_until = time.time() + sleep_s
         return
     except Exception as e:
         mark_failed(conn, video_id, str(e))
@@ -578,14 +607,15 @@ def process(conn, video_id: str):
 def process_subtitle(conn, video_id: str) -> None:
     """Scout subtitle URLs for a video via RapidAPI /subtitle.php.
     Stores payload in subtitle_raw_payload for subtitle_mule to download."""
+    global _subtitle_blocked_until
     sleep_s = _quota_sleep_seconds()
     if sleep_s > 0:
         log.warning(
             f"[QUOTA-GUARD] remaining={_quota_remaining} ≤ {HARD_QUOTA_THRESHOLD} "
-            f"— requeuing subtitle job {video_id}, sleeping {sleep_s}s"
+            f"— requeuing subtitle job {video_id}, blocking subtitle {sleep_s}s"
         )
         requeue_subtitle(conn, video_id)
-        _shutdown.wait(sleep_s)
+        _subtitle_blocked_until = time.time() + sleep_s
         return
 
     delay = _adaptive_delay()
@@ -605,43 +635,43 @@ def process_subtitle(conn, video_id: str) -> None:
     try:
         payload = get_subtitle_payload(video_id)
         persist_quota(conn)
-        _on_api_success()
+        _on_subtitle_success()
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         persist_quota(conn)
         if status == 429:
             sleep_s = max(_quota_reset_at - int(time.time()), 3600) if _quota_reset_at else 3600
-            log.warning(f"[429] {video_id}: subtitle quota hit — requeuing, sleeping {sleep_s}s")
+            log.warning(f"[429] {video_id}: subtitle quota hit — requeuing, blocking subtitle {sleep_s}s")
             requeue_subtitle(conn, video_id)
-            _shutdown.wait(sleep_s)
+            _subtitle_blocked_until = time.time() + sleep_s
             return
         if status == 407:
-            log.warning(f"[407] {video_id}: subtitle proxy auth — requeuing, backing off 60s")
+            log.warning(f"[407] {video_id}: subtitle proxy auth — requeuing, blocking subtitle 60s")
             requeue_subtitle(conn, video_id)
-            _shutdown.wait(60)
+            _subtitle_blocked_until = time.time() + 60
             return
         if status in (500, 502, 503, 504):
-            _on_api_failure()
-            sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
-            log.warning(f"[5XX] {video_id}: subtitle RapidAPI {status} — requeuing, sleeping {sleep_s}s")
+            _on_subtitle_failure()
+            sleep_s = _circuit_sleep_seconds(_subtitle_failures) if _subtitle_circuit_open() else 60
+            log.warning(f"[5XX] {video_id}: subtitle RapidAPI {status} — requeuing, blocking subtitle {sleep_s}s")
             requeue_subtitle(conn, video_id)
-            _shutdown.wait(sleep_s)
+            _subtitle_blocked_until = time.time() + sleep_s
             return
         mark_subtitle_failed(conn, video_id, f"RapidAPI /subtitle.php HTTP {status}")
         return
     except TransientAPIError as e:
-        _on_api_failure()
-        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
-        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, sleeping {sleep_s}s")
+        _on_subtitle_failure()
+        sleep_s = _circuit_sleep_seconds(_subtitle_failures) if _subtitle_circuit_open() else 60
+        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, blocking subtitle {sleep_s}s")
         requeue_subtitle(conn, video_id)
-        _shutdown.wait(sleep_s)
+        _subtitle_blocked_until = time.time() + sleep_s
         return
     except (requests.ConnectionError, requests.Timeout) as e:
-        _on_api_failure()
-        sleep_s = _circuit_sleep_seconds() if _circuit_open() else 60
-        log.warning(f"[CONN-ERR] {video_id}: subtitle {e} — requeuing, sleeping {sleep_s}s")
+        _on_subtitle_failure()
+        sleep_s = _circuit_sleep_seconds(_subtitle_failures) if _subtitle_circuit_open() else 60
+        log.warning(f"[CONN-ERR] {video_id}: subtitle {e} — requeuing, blocking subtitle {sleep_s}s")
         requeue_subtitle(conn, video_id)
-        _shutdown.wait(sleep_s)
+        _subtitle_blocked_until = time.time() + sleep_s
         return
     except Exception as e:
         mark_subtitle_failed(conn, video_id, str(e))
@@ -672,7 +702,9 @@ def process_subtitle(conn, video_id: str) -> None:
 
 
 def main():
-    global _media_paused, _subtitle_paused, _consecutive_api_failures, _circuit_opened_at
+    global _media_paused, _subtitle_paused, \
+           _media_failures, _media_circuit_opened_at, _media_blocked_until, \
+           _subtitle_failures, _subtitle_circuit_opened_at, _subtitle_blocked_until
     log.info("Scout started — polling for media (queued) and subtitle (pending) jobs...")
     while True:
         try:
@@ -695,31 +727,31 @@ def main():
                     _subtitle_paused = False
 
             try:
-                # Circuit check — API detected down; block all polling until probe window
-                if _circuit_open():
-                    elapsed = time.time() - _circuit_opened_at
-                    remaining = max(0, CIRCUIT_RESET_AFTER - elapsed)
-                    if remaining > 0:
-                        log.info(f"[CIRCUIT-OPEN] API down — no polling, probe in {remaining:.0f}s")
-                        _shutdown.wait(min(remaining, 60))
-                        continue
-                    else:
-                        log.info(f"[CIRCUIT-PROBE] {CIRCUIT_RESET_AFTER}s elapsed — resetting circuit for probe")
-                        _consecutive_api_failures = 0
-                        _circuit_opened_at = 0.0
+                now = time.time()
+
+                # Probe: reset each circuit independently after CIRCUIT_RESET_AFTER seconds
+                if _media_circuit_open() and now - _media_circuit_opened_at >= CIRCUIT_RESET_AFTER:
+                    log.info("[MEDIA-CIRCUIT-PROBE] reset for probe")
+                    _media_failures = 0
+                    _media_circuit_opened_at = 0.0
+
+                if _subtitle_circuit_open() and now - _subtitle_circuit_opened_at >= CIRCUIT_RESET_AFTER:
+                    log.info("[SUBTITLE-CIRCUIT-PROBE] reset for probe")
+                    _subtitle_failures = 0
+                    _subtitle_circuit_opened_at = 0.0
 
                 did_work = False
 
-                # Media jobs (queued → ready_for_download)
-                if not _media_paused:
+                # Media pipeline — skip if circuit open OR still in backoff window
+                if not _media_paused and not _media_circuit_open() and now >= _media_blocked_until:
                     video_id = poll_job(conn)
                     if video_id:
                         log_event(log, "info", "queue_claim", "Media job claimed", worker="scout", queue="youtube.videos", video_id=video_id, media_status="processing")
                         process(conn, video_id)
                         did_work = True
 
-                # Subtitle jobs — run every iteration so subtitle never starves behind media
-                if not _subtitle_paused:
+                # Subtitle pipeline — fully independent circuit and backoff
+                if not _subtitle_paused and not _subtitle_circuit_open() and now >= _subtitle_blocked_until:
                     video_id = poll_subtitle_job(conn)
                     if video_id:
                         log_event(log, "info", "queue_claim", "Subtitle job claimed", worker="scout", queue="youtube.videos", video_id=video_id, subtitle_status="processing")
