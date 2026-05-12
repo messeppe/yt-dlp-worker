@@ -206,6 +206,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
     stream_name = os.path.basename(dest)
     next_pct_log = 10.0
     proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+    proxy_rotations = 0
 
     for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
         proxies = make_sticky_proxy(proxy_idx)
@@ -265,6 +266,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                     f"[DOWNLOAD-RETRY] {stream_name} ended cleanly early at {format_bytes(downloaded)}; retrying"
                 )
                 proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+                proxy_rotations += 1
 
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
@@ -275,6 +277,7 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                 )
                 time.sleep(sleep_s)
                 proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+                proxy_rotations += 1
                 continue
             raise
         except (
@@ -289,7 +292,8 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                 f"[DOWNLOAD-CRASH] {stream_name} proxy={proxy_idx} died at {format_bytes(downloaded)} bytes: {e} — swapping proxy and backing off {sleep_s}s"
             )
             time.sleep(sleep_s)
-            proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))  # Fresh proxy
+            proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
+            proxy_rotations += 1
             continue
 
     elapsed = max(time.time() - start, 0.001)
@@ -300,7 +304,13 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
     log.info(
         f"[DOWNLOAD-DONE] {stream_name} {format_bytes(downloaded)} elapsed={elapsed:.1f}s"
     )
-    return downloaded
+    return {
+        "bytes": downloaded,
+        "elapsed": elapsed,
+        "speed_mbps": round(downloaded / elapsed / 1_000_000, 3),
+        "proxy_idx": proxy_idx,
+        "proxy_rotations": proxy_rotations,
+    }
 
 
 def mark_complete(conn, video_id: str, files: list):
@@ -385,7 +395,12 @@ def process(
                 ext = infer_stream_ext(v_url, "mp4")
                 local = os.path.join(tmpdir, f"video.{ext}")
                 log.info(f"[DOWNLOAD] single cached stream {video_id}")
-                download_stream(v_url, local)
+                stats = download_stream(v_url, local)
+                log_event(log, "info", "download_complete", "Stream downloaded",
+                    worker="media-mule", video_id=video_id, stream="video",
+                    speed_mbps=stats["speed_mbps"], downloaded_bytes=stats["bytes"],
+                    elapsed_seconds=round(stats["elapsed"], 2),
+                    proxy_idx=stats["proxy_idx"], proxy_rotations=stats["proxy_rotations"])
                 size = os.path.getsize(local)
                 key = f"youtube/{safe_channel}/{safe_title}_{video_id}.{ext}"
                 s3.upload_file(local, S3_BUCKET, key)
@@ -398,9 +413,19 @@ def process(
                 alocal = os.path.join(tmpdir, f"audio.{aext}")
 
                 log.info(f"[DOWNLOAD] video stream {video_id}")
-                download_stream(v_url, vlocal)
+                vstats = download_stream(v_url, vlocal)
+                log_event(log, "info", "download_complete", "Stream downloaded",
+                    worker="media-mule", video_id=video_id, stream="video",
+                    speed_mbps=vstats["speed_mbps"], downloaded_bytes=vstats["bytes"],
+                    elapsed_seconds=round(vstats["elapsed"], 2),
+                    proxy_idx=vstats["proxy_idx"], proxy_rotations=vstats["proxy_rotations"])
                 log.info(f"[DOWNLOAD] audio stream {video_id}")
-                download_stream(a_url, alocal)
+                astats = download_stream(a_url, alocal)
+                log_event(log, "info", "download_complete", "Stream downloaded",
+                    worker="media-mule", video_id=video_id, stream="audio",
+                    speed_mbps=astats["speed_mbps"], downloaded_bytes=astats["bytes"],
+                    elapsed_seconds=round(astats["elapsed"], 2),
+                    proxy_idx=astats["proxy_idx"], proxy_rotations=astats["proxy_rotations"])
 
                 vsize = os.path.getsize(vlocal)
                 asize = os.path.getsize(alocal)

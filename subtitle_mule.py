@@ -267,11 +267,16 @@ def download_vtt(url: str, video_id: str = "", lang: str = "") -> str:
             resp = requests.get(url, proxies=proxies, timeout=(10, 30))
             resp.raise_for_status()
             content = resp.text
-            elapsed = time.time() - start
+            elapsed = max(time.time() - start, 0.001)
             size = len(content.encode("utf-8"))
             log.info(
                 f"[DOWNLOAD-DONE] {video_id} lang={lang} {size} bytes elapsed={elapsed:.1f}s"
             )
+            log_event(log, "info", "download_complete", "VTT downloaded",
+                worker="subtitle-mule", video_id=video_id, lang=lang,
+                speed_kbps=round(size / elapsed / 1_000, 3),
+                downloaded_bytes=size, elapsed_seconds=round(elapsed, 2),
+                proxy_idx=proxy_idx)
             if not content or not content.strip():
                 raise ValueError("VTT response was empty")
             if not content.lstrip().startswith("WEBVTT"):
