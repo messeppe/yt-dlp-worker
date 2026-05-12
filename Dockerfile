@@ -12,6 +12,7 @@ COPY media_mule.py .
 COPY scout.py .
 COPY subtitle_mule.py .
 COPY logging_setup.py .
+COPY proxy_pool.py .
 COPY start_workers.sh .
 RUN chmod +x start_workers.sh
 
