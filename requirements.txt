@@ -1,3 +1,4 @@
 requests
+httpx[http2]
 boto3
 psycopg2-binary

@@ -6,9 +6,9 @@ import time
 from urllib.parse import urlparse
 
 import boto3
+import httpx
 import psycopg2
 import psycopg2.pool
-import requests
 from logging_setup import setup_logging, log_event
 from proxy_pool import build_pools, pick_pool
 
@@ -203,69 +203,68 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
     proxy_rotations = 0
 
     for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
-        proxies = pool.make_proxies(proxy_idx)
+        proxy_url = pool.proxy_url(proxy_idx)
         headers = {"Accept-Encoding": "identity"}
         if downloaded > 0:
             headers["Range"] = f"bytes={downloaded}-"
 
         try:
-            timeout = (15, STREAM_READ_TIMEOUT)
-            with requests.get(
-                url, proxies=proxies, headers=headers, stream=True, timeout=timeout
-            ) as r:
-                r.raise_for_status()
+            timeout = httpx.Timeout(15.0, read=STREAM_READ_TIMEOUT)
+            with httpx.Client(proxy=proxy_url, http2=True, timeout=timeout, follow_redirects=True) as client:
+                with client.stream("GET", url, headers=headers) as r:
+                    r.raise_for_status()
 
-                if downloaded > 0 and r.status_code == 200:
-                    log.warning(
-                        f"[DOWNLOAD-RESUME-RESET] {stream_name} server ignored Range; restarting"
+                    if downloaded > 0 and r.status_code == 200:
+                        log.warning(
+                            f"[DOWNLOAD-RESUME-RESET] {stream_name} server ignored Range; restarting"
+                        )
+                        downloaded = 0
+                        if os.path.exists(dest):
+                            os.remove(dest)
+
+                    cl = int(r.headers.get("Content-Length", "0") or "0")
+                    if cl > 0:
+                        total = downloaded + cl if r.status_code == 206 else cl
+                    else:
+                        total = total or 0
+
+                    log.info(
+                        f"[DOWNLOAD] {stream_name} proxy={proxy_idx} attempt={stream_attempt}/{STREAM_MAX_RETRIES} from={format_bytes(downloaded)}"
                     )
-                    downloaded = 0
-                    if os.path.exists(dest):
-                        os.remove(dest)
 
-                cl = int(r.headers.get("Content-Length", "0") or "0")
-                if cl > 0:
-                    total = downloaded + cl if r.status_code == 206 else cl
-                else:
-                    total = total or 0
+                    mode = "ab" if downloaded > 0 else "wb"
+                    with open(dest, mode) as f:
+                        for chunk in r.iter_bytes(chunk_size=1048576):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.time()
+                            if now - last_log >= 30.0:
+                                elapsed = max(now - start, 0.001)
+                                speed_mbps = round(downloaded / elapsed / 1_000_000, 3)
+                                pct = round(min((downloaded / total) * 100, 100.0), 1) if total > 0 else 0.0
+                                log_event(log, "info", "download_progress", "Downloading",
+                                    worker_idx=worker_idx, video_id=video_id, stream=stream,
+                                    downloaded_bytes=downloaded,
+                                    total_bytes=total if total > 0 else None,
+                                    pct=pct, speed_mbps=speed_mbps, proxy_idx=proxy_idx)
+                                if total > 0:
+                                    log.info(
+                                        f"[DOWNLOAD] {stream_name} {render_progress_bar(pct)} {pct:.1f}% "
+                                        f"{format_bytes(downloaded)}/{format_bytes(total)} speed={format_bytes(speed_mbps * 1_000_000)}/s"
+                                    )
+                                last_log = now
 
-                log.info(
-                    f"[DOWNLOAD] {stream_name} proxy={proxy_idx} attempt={stream_attempt}/{STREAM_MAX_RETRIES} from={format_bytes(downloaded)}"
-                )
+                    if total == 0 or downloaded >= total:
+                        break
+                    log.warning(
+                        f"[DOWNLOAD-RETRY] {stream_name} ended cleanly early at {format_bytes(downloaded)}; retrying"
+                    )
+                    proxy_idx = pool.pick()
+                    proxy_rotations += 1
 
-                mode = "ab" if downloaded > 0 else "wb"
-                with open(dest, mode) as f:
-                    for chunk in r.iter_content(chunk_size=1048576):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        now = time.time()
-                        if now - last_log >= 30.0:
-                            elapsed = max(now - start, 0.001)
-                            speed_mbps = round(downloaded / elapsed / 1_000_000, 3)
-                            pct = round(min((downloaded / total) * 100, 100.0), 1) if total > 0 else 0.0
-                            log_event(log, "info", "download_progress", "Downloading",
-                                worker_idx=worker_idx, video_id=video_id, stream=stream,
-                                downloaded_bytes=downloaded,
-                                total_bytes=total if total > 0 else None,
-                                pct=pct, speed_mbps=speed_mbps, proxy_idx=proxy_idx)
-                            if total > 0:
-                                log.info(
-                                    f"[DOWNLOAD] {stream_name} {render_progress_bar(pct)} {pct:.1f}% "
-                                    f"{format_bytes(downloaded)}/{format_bytes(total)} speed={format_bytes(speed_mbps * 1_000_000)}/s"
-                                )
-                            last_log = now
-
-                if total == 0 or downloaded >= total:
-                    break
-                log.warning(
-                    f"[DOWNLOAD-RETRY] {stream_name} ended cleanly early at {format_bytes(downloaded)}; retrying"
-                )
-                proxy_idx = pool.pick()
-                proxy_rotations += 1
-
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
             if status == 403 and stream_attempt < 3:
                 sleep_s = min(2**stream_attempt, 15)
@@ -280,9 +279,10 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                 continue
             raise
         except (
-            requests.exceptions.ChunkedEncodingError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.ReadTimeout,
+            httpx.RemoteProtocolError,
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
         ) as e:
             if stream_attempt == STREAM_MAX_RETRIES:
                 raise
@@ -443,7 +443,7 @@ def process(
             mark_complete(conn, video_id, uploaded)
             log.info(f"[SUCCESS] {video_id} uploaded {[u[0] for u in uploaded]}")
 
-    except requests.exceptions.HTTPError as e:
+    except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response is not None else 0
         if status in (403, 404, 410):
             log.warning(f"[FAIL] {video_id}: HTTP {status} — URL expired or video gone")

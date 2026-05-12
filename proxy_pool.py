@@ -35,15 +35,15 @@ class ProxyPool:
         with self._lock:
             self._cooldowns[idx] = time.time() + cooldown_secs
 
-    def make_proxies(self, idx: int) -> dict:
+    def proxy_url(self, idx: int) -> str:
         if self.base_port:
-            # Port-based sticky (Decodo): swap port to base_port + idx
-            url = re.sub(r":\d+$", f":{self.base_port + idx}", self.url_template)
+            return re.sub(r":\d+$", f":{self.base_port + idx}", self.url_template)
         elif "-rotate" in self.url_template:
-            # Subdomain-based sticky (Webshare): -rotate -> -N
-            url = self.url_template.replace("-rotate", f"-{idx}", 1)
-        else:
-            url = self.url_template
+            return self.url_template.replace("-rotate", f"-{idx}", 1)
+        return self.url_template
+
+    def make_proxies(self, idx: int) -> dict:
+        url = self.proxy_url(idx)
         return {"http": url, "https": url}
 
 
