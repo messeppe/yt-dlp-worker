@@ -198,13 +198,13 @@ def render_progress_bar(pct: float, width: int = 20) -> str:
     return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
 
-def download_stream(url: str, dest: str, initial_proxy: dict = None):
+def download_stream(url: str, dest: str, initial_proxy: dict = None,
+                    video_id: str = "", worker_idx: str = "0", stream: str = "video"):
     start = time.time()
     last_log = start
     downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
     total = 0
     stream_name = os.path.basename(dest)
-    next_pct_log = 10.0
     proxy_idx = random.randint(1, max(PROXY_POOL_SIZE, 1))
     proxy_rotations = 0
 
@@ -249,15 +249,18 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None):
                         now = time.time()
                         if now - last_log >= 30.0:
                             elapsed = max(now - start, 0.001)
-                            speed = downloaded / elapsed
+                            speed_mbps = round(downloaded / elapsed / 1_000_000, 3)
+                            pct = round(min((downloaded / total) * 100, 100.0), 1) if total > 0 else 0.0
+                            log_event(log, "info", "download_progress", "Downloading",
+                                worker_idx=worker_idx, video_id=video_id, stream=stream,
+                                downloaded_bytes=downloaded,
+                                total_bytes=total if total > 0 else None,
+                                pct=pct, speed_mbps=speed_mbps, proxy_idx=proxy_idx)
                             if total > 0:
-                                pct = min((downloaded / total) * 100, 100.0)
-                                if pct >= next_pct_log:
-                                    log.info(
-                                        f"[DOWNLOAD] {stream_name} {render_progress_bar(pct)} {pct:.1f}% {format_bytes(downloaded)}/{format_bytes(total)} speed={format_bytes(speed)}/s"
-                                    )
-                                    while next_pct_log <= pct:
-                                        next_pct_log += 10.0
+                                log.info(
+                                    f"[DOWNLOAD] {stream_name} {render_progress_bar(pct)} {pct:.1f}% "
+                                    f"{format_bytes(downloaded)}/{format_bytes(total)} speed={format_bytes(speed_mbps * 1_000_000)}/s"
+                                )
                             last_log = now
 
                 if total == 0 or downloaded >= total:
@@ -381,6 +384,7 @@ def process(
     s3 = get_s3()
     safe_channel = sanitize_path_segment(channel_handle)
     safe_title = sanitize_filename(title) if title else video_id
+    worker_idx = threading.current_thread().name.split('_')[-1] if '_' in threading.current_thread().name else '0'
 
     stop_heartbeat = threading.Event()
     heartbeat = threading.Thread(
@@ -395,9 +399,9 @@ def process(
                 ext = infer_stream_ext(v_url, "mp4")
                 local = os.path.join(tmpdir, f"video.{ext}")
                 log.info(f"[DOWNLOAD] single cached stream {video_id}")
-                stats = download_stream(v_url, local)
+                stats = download_stream(v_url, local, video_id=video_id, worker_idx=worker_idx, stream="video")
                 log_event(log, "info", "download_complete", "Stream downloaded",
-                    worker="media-mule", video_id=video_id, stream="video",
+                    worker="media-mule", worker_idx=worker_idx, video_id=video_id, stream="video",
                     speed_mbps=stats["speed_mbps"], downloaded_bytes=stats["bytes"],
                     elapsed_seconds=round(stats["elapsed"], 2),
                     proxy_idx=stats["proxy_idx"], proxy_rotations=stats["proxy_rotations"])
@@ -413,16 +417,16 @@ def process(
                 alocal = os.path.join(tmpdir, f"audio.{aext}")
 
                 log.info(f"[DOWNLOAD] video stream {video_id}")
-                vstats = download_stream(v_url, vlocal)
+                vstats = download_stream(v_url, vlocal, video_id=video_id, worker_idx=worker_idx, stream="video")
                 log_event(log, "info", "download_complete", "Stream downloaded",
-                    worker="media-mule", video_id=video_id, stream="video",
+                    worker="media-mule", worker_idx=worker_idx, video_id=video_id, stream="video",
                     speed_mbps=vstats["speed_mbps"], downloaded_bytes=vstats["bytes"],
                     elapsed_seconds=round(vstats["elapsed"], 2),
                     proxy_idx=vstats["proxy_idx"], proxy_rotations=vstats["proxy_rotations"])
                 log.info(f"[DOWNLOAD] audio stream {video_id}")
-                astats = download_stream(a_url, alocal)
+                astats = download_stream(a_url, alocal, video_id=video_id, worker_idx=worker_idx, stream="audio")
                 log_event(log, "info", "download_complete", "Stream downloaded",
-                    worker="media-mule", video_id=video_id, stream="audio",
+                    worker="media-mule", worker_idx=worker_idx, video_id=video_id, stream="audio",
                     speed_mbps=astats["speed_mbps"], downloaded_bytes=astats["bytes"],
                     elapsed_seconds=round(astats["elapsed"], 2),
                     proxy_idx=astats["proxy_idx"], proxy_rotations=astats["proxy_rotations"])

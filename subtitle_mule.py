@@ -129,7 +129,8 @@ def poll_job(conn):
                 "UPDATE youtube.videos SET subtitle_status='processing' WHERE id=%s",
                 (row[0],),
             )
-            log_event(log, "info", "queue_claim", "Subtitle queue job claimed", worker="subtitle-mule", queue="youtube.subtitle_queue", video_id=row[0])
+            _worker_idx = threading.current_thread().name.split('_')[-1] if '_' in threading.current_thread().name else '0'
+            log_event(log, "info", "queue_claim", "Subtitle queue job claimed", worker="subtitle-mule", worker_idx=_worker_idx, queue="youtube.subtitle_queue", video_id=row[0])
         conn.commit()
     if row:
         return row[0], row[1], row[2] or "unknown", row[3]
@@ -246,7 +247,7 @@ def vtt_url(url: str) -> str:
     return re.sub(r"\bfmt=json3\b", "fmt=vtt", url)
 
 
-def download_vtt(url: str, video_id: str = "", lang: str = "") -> str:
+def download_vtt(url: str, video_id: str = "", lang: str = "", worker_idx: str = "0") -> str:
     """Download VTT subtitle with retry, proxy rotation, and exponential backoff.
 
     Matches the media mule's download_stream retry strategy:
@@ -273,7 +274,7 @@ def download_vtt(url: str, video_id: str = "", lang: str = "") -> str:
                 f"[DOWNLOAD-DONE] {video_id} lang={lang} {size} bytes elapsed={elapsed:.1f}s"
             )
             log_event(log, "info", "download_complete", "VTT downloaded",
-                worker="subtitle-mule", video_id=video_id, lang=lang,
+                worker="subtitle-mule", worker_idx=worker_idx, video_id=video_id, lang=lang,
                 speed_kbps=round(size / elapsed / 1_000, 3),
                 downloaded_bytes=size, elapsed_seconds=round(elapsed, 2),
                 proxy_idx=proxy_idx)
@@ -323,6 +324,7 @@ def process(conn, video_id, payload, channel_handle, title):
     s3 = get_s3()
     safe_channel = sanitize_path_segment(channel_handle)
     safe_title = sanitize_filename(title) if title else video_id
+    worker_idx = threading.current_thread().name.split('_')[-1] if '_' in threading.current_thread().name else '0'
 
     stop_heartbeat = threading.Event()
     heartbeat = threading.Thread(
@@ -354,7 +356,7 @@ def process(conn, video_id, payload, channel_handle, title):
                 lang = track["language_code"] or "unknown"
                 try:
                     content = download_vtt(
-                        vtt_url(track["url"]), video_id=video_id, lang=lang
+                        vtt_url(track["url"]), video_id=video_id, lang=lang, worker_idx=worker_idx
                     )
 
                     local = os.path.join(tmpdir, f"{video_id}_{lang}.vtt")
