@@ -567,18 +567,19 @@ def process(conn, video_id: str):
         log.warning(f"[FAIL] {video_id}: RapidAPI HTTP {status}", exc_info=True)
         return
     except TransientAPIError as e:
-        # Per-video API error ({"status":"error"} body) — NOT an infrastructure failure.
-        # Requeue + short backoff but do NOT increment circuit breaker counter.
-        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, backing off 60s")
-        requeue(conn, video_id)
-        _media_blocked_until = time.time() + 60
-        return
-    except (requests.ConnectionError, requests.Timeout) as e:
+        # RapidAPI returns HTTP 200 even when broken; only {"status":"error"} body signals failure.
+        # Treat as infrastructure failure → circuit breaker.
         _on_media_failure()
         sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
-        log.warning(f"[CONN-ERR] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
+        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
         requeue(conn, video_id)
         _media_blocked_until = time.time() + sleep_s
+        return
+    except (requests.ConnectionError, requests.Timeout) as e:
+        # Network blip — don't trip circuit; brief backoff + requeue.
+        log.warning(f"[CONN-ERR] {video_id}: {e} — requeuing, backing off 30s")
+        requeue(conn, video_id)
+        _media_blocked_until = time.time() + 30
         return
     except Exception as e:
         mark_failed(conn, video_id, str(e))
@@ -660,17 +661,18 @@ def process_subtitle(conn, video_id: str) -> None:
         mark_subtitle_failed(conn, video_id, f"RapidAPI /subtitle.php HTTP {status}")
         return
     except TransientAPIError as e:
-        # Per-video API error — NOT an infrastructure failure; don't trip circuit breaker.
-        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, backing off 60s")
-        requeue_subtitle(conn, video_id)
-        _subtitle_blocked_until = time.time() + 60
-        return
-    except (requests.ConnectionError, requests.Timeout) as e:
+        # status="error" in 200 body is the only infra failure signal RapidAPI emits.
         _on_subtitle_failure()
         sleep_s = _circuit_sleep_seconds(_subtitle_failures) if _subtitle_circuit_open() else 60
-        log.warning(f"[CONN-ERR] {video_id}: subtitle {e} — requeuing, blocking subtitle {sleep_s}s")
+        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, blocking subtitle {sleep_s}s")
         requeue_subtitle(conn, video_id)
         _subtitle_blocked_until = time.time() + sleep_s
+        return
+    except (requests.ConnectionError, requests.Timeout) as e:
+        # Network blip — don't trip circuit.
+        log.warning(f"[CONN-ERR] {video_id}: subtitle {e} — requeuing, backing off 30s")
+        requeue_subtitle(conn, video_id)
+        _subtitle_blocked_until = time.time() + 30
         return
     except Exception as e:
         mark_subtitle_failed(conn, video_id, str(e))
