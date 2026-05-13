@@ -210,6 +210,8 @@ def requeue_subtitle(conn, video_id: str) -> None:
     log_event(log, "info", "queue_requeue", "Subtitle job requeued", worker="scout", queue="youtube.videos", video_id=video_id, to_status="pending")
 
 
+
+
 def poll_job(conn):
     """Claim one queued video atomically. Skips videos with unexpired stream URLs."""
     with conn.cursor() as cur:
@@ -296,7 +298,24 @@ def poll_subtitle_job(conn):
 
 
 class TransientAPIError(Exception):
-    """API returned HTTP 200 but body signals a transient error (e.g. 'try again!')."""
+    """API returned HTTP 200 but body signals a transient error (e.g. 'try again!').
+    Default classification — keep retrying, trip circuit breaker if persistent."""
+
+
+class PermanentVideoError(Exception):
+    """API confirms this specific video is unavailable (deleted, private, region-
+    blocked, age-restricted). Per-video failure — mark failed, do NOT touch circuit."""
+
+
+# Only this exact message classifies as per-video error. Any other message
+# (including "try again!") means the API/extractor is down → keep retrying.
+_PERMANENT_VIDEO_MESSAGE = "video not found"
+
+
+def _classify_api_error(message: str) -> type[Exception]:
+    if _PERMANENT_VIDEO_MESSAGE in (message or "").lower():
+        return PermanentVideoError
+    return TransientAPIError
 
 
 def get_streams(video_id: str):
@@ -314,7 +333,7 @@ def get_streams(video_id: str):
     data = resp.json()
     if data.get("status") == "error":
         msg = data.get("message") or data.get("msg") or "unknown error"
-        raise TransientAPIError(f"API body status=error: {msg}")
+        raise _classify_api_error(msg)(f"API body status=error: {msg}")
     if "results" not in data:
         log.warning(f"[API-WARN] {video_id}: no 'results' key — status={data.get('status_code')}")
     return data.get("title", ""), data.get("results", [])
@@ -338,7 +357,7 @@ def get_subtitle_payload(video_id: str) -> dict:
     data = resp.json()
     if data.get("status") == "error":
         msg = data.get("message") or data.get("msg") or "unknown error"
-        raise TransientAPIError(f"API body status=error: {msg}")
+        raise _classify_api_error(msg)(f"API body status=error: {msg}")
     return data
 
 
@@ -566,9 +585,12 @@ def process(conn, video_id: str):
         mark_failed(conn, video_id, f"RapidAPI HTTP {status}")
         log.warning(f"[FAIL] {video_id}: RapidAPI HTTP {status}", exc_info=True)
         return
+    except PermanentVideoError as e:
+        log.info(f"[VIDEO-BAD] {video_id}: {e} — marking failed (per-video)")
+        mark_failed(conn, video_id, str(e))
+        return
     except TransientAPIError as e:
-        # RapidAPI returns HTTP 200 even when broken; only {"status":"error"} body signals failure.
-        # Treat as infrastructure failure → circuit breaker.
+        # Message did NOT match "video not found" → API/extractor down. Trip circuit.
         _on_media_failure()
         sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
         log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
@@ -660,8 +682,12 @@ def process_subtitle(conn, video_id: str) -> None:
             return
         mark_subtitle_failed(conn, video_id, f"RapidAPI /subtitle.php HTTP {status}")
         return
+    except PermanentVideoError as e:
+        log.info(f"[SUBTITLE-BAD] {video_id}: {e} — marking failed (per-video)")
+        mark_subtitle_failed(conn, video_id, str(e))
+        return
     except TransientAPIError as e:
-        # status="error" in 200 body is the only infra failure signal RapidAPI emits.
+        # Message did NOT match "video not found" → API/extractor down. Trip circuit.
         _on_subtitle_failure()
         sleep_s = _circuit_sleep_seconds(_subtitle_failures) if _subtitle_circuit_open() else 60
         log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, blocking subtitle {sleep_s}s")
