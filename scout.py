@@ -567,11 +567,11 @@ def process(conn, video_id: str):
         log.warning(f"[FAIL] {video_id}: RapidAPI HTTP {status}", exc_info=True)
         return
     except TransientAPIError as e:
-        _on_media_failure()
-        sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
-        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
+        # Per-video API error ({"status":"error"} body) — NOT an infrastructure failure.
+        # Requeue + short backoff but do NOT increment circuit breaker counter.
+        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, backing off 60s")
         requeue(conn, video_id)
-        _media_blocked_until = time.time() + sleep_s
+        _media_blocked_until = time.time() + 60
         return
     except (requests.ConnectionError, requests.Timeout) as e:
         _on_media_failure()
@@ -660,11 +660,10 @@ def process_subtitle(conn, video_id: str) -> None:
         mark_subtitle_failed(conn, video_id, f"RapidAPI /subtitle.php HTTP {status}")
         return
     except TransientAPIError as e:
-        _on_subtitle_failure()
-        sleep_s = _circuit_sleep_seconds(_subtitle_failures) if _subtitle_circuit_open() else 60
-        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, blocking subtitle {sleep_s}s")
+        # Per-video API error — NOT an infrastructure failure; don't trip circuit breaker.
+        log.warning(f"[TRANSIENT] {video_id}: subtitle {e} — requeuing, backing off 60s")
         requeue_subtitle(conn, video_id)
-        _subtitle_blocked_until = time.time() + sleep_s
+        _subtitle_blocked_until = time.time() + 60
         return
     except (requests.ConnectionError, requests.Timeout) as e:
         _on_subtitle_failure()
