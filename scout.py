@@ -24,7 +24,7 @@ MAX_MEDIA_QUEUE    = int(os.environ.get("MAX_MEDIA_QUEUE", "50"))
 MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "10"))
 MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "50"))
 MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "10"))
-MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
+MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}

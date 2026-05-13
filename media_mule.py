@@ -19,7 +19,7 @@ S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 DB_URL = os.environ["SUPABASE_DB_URL"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
-MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
+MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "15"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
 
@@ -359,6 +359,47 @@ def mark_failed(conn, video_id: str, error: str):
         conn.commit()
 
 
+def mark_url_expired(conn, video_id: str, error: str) -> None:
+    """CDN returned 403/404/410 — URL likely stale, NOT a bad video.
+    Delete stale queue row, send video back to scout for fresh URL.
+    Bumps scout_retry_count; at MAX_SCOUT_RETRIES marks video permanently failed."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM youtube.media_queue WHERE video_id = %s", (video_id,))
+        cur.execute(
+            """UPDATE youtube.videos
+               SET media_status = CASE
+                       WHEN scout_retry_count >= %s THEN 'failed'
+                       ELSE 'queued'
+                   END,
+                   media_locked_until = NULL,
+                   media_last_error   = %s,
+                   scout_retry_count  = CASE
+                       WHEN scout_retry_count >= %s THEN scout_retry_count
+                       ELSE scout_retry_count + 1
+                   END
+               WHERE id = %s
+               RETURNING media_status, scout_retry_count""",
+            (MAX_SCOUT_RETRIES, error[:500], MAX_SCOUT_RETRIES, video_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        return
+    new_status, attempts = row
+    log_event(log, "warning", "queue_dequeue", "Media queue row removed (url expired)",
+              worker="media-mule", queue="youtube.media_queue", video_id=video_id, reason="url_expired")
+    if new_status == "failed":
+        log.warning(f"[URL-EXPIRED-CAP] {video_id}: scout_retry_count={attempts} hit MAX_SCOUT_RETRIES — marked failed")
+        log_event(log, "warning", "db_write", "Marked failed after scout retry cap",
+                  worker="media-mule", table="youtube.videos", video_id=video_id,
+                  media_status="failed", error=error[:200])
+    else:
+        log.info(f"[URL-EXPIRED] {video_id}: re-queuing for scout (attempt {attempts}/{MAX_SCOUT_RETRIES})")
+        log_event(log, "info", "queue_requeue", "Video requeued for fresh URL scout",
+                  worker="media-mule", queue="youtube.videos", video_id=video_id,
+                  to_status="queued", attempt=attempts)
+
+
 def requeue_to_ready(conn, video_id: str) -> None:
     """Release lock in media_queue — row stays for next worker to claim."""
     with conn.cursor() as cur:
@@ -446,8 +487,8 @@ def process(
     except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response is not None else 0
         if status in (403, 404, 410):
-            log.warning(f"[FAIL] {video_id}: HTTP {status} — URL expired or video gone")
-            mark_failed(conn, video_id, f"HTTP {status} — URL expired or video gone")
+            log.warning(f"[URL-EXPIRED] {video_id}: HTTP {status} — sending back to scout for fresh URL")
+            mark_url_expired(conn, video_id, f"HTTP {status} — CDN URL stale, needs re-scout")
         else:
             log.warning(f"[REQUEUE] {video_id}: HTTP {status} transient")
             requeue_to_ready(conn, video_id)

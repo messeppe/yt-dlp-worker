@@ -19,7 +19,7 @@ S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 DB_URL = os.environ["SUPABASE_DB_URL"]
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
-MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "10"))
+MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 
 _proxy_pool, _proxy_pool_b = build_pools()
 
