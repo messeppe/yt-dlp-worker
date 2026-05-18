@@ -1,3 +1,4 @@
+import collections
 import datetime
 import json
 import os
@@ -20,12 +21,13 @@ HARD_QUOTA_THRESHOLD   = int(os.environ.get("HARD_QUOTA_THRESHOLD", "20"))
 CIRCUIT_OPEN_THRESHOLD = int(os.environ.get("CIRCUIT_OPEN_THRESHOLD", "5"))
 CIRCUIT_SLEEP_BASE     = int(os.environ.get("CIRCUIT_SLEEP_BASE", "300"))
 CIRCUIT_RESET_AFTER    = int(os.environ.get("CIRCUIT_RESET_AFTER", "3600"))
-MAX_MEDIA_QUEUE    = int(os.environ.get("MAX_MEDIA_QUEUE", "50"))
-MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "10"))
-MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "50"))
-MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "10"))
+MAX_MEDIA_QUEUE    = int(os.environ.get("MAX_MEDIA_QUEUE", "120"))
+MIN_MEDIA_QUEUE    = int(os.environ.get("MIN_MEDIA_QUEUE", "40"))
+MAX_SUBTITLE_QUEUE = int(os.environ.get("MAX_SUBTITLE_QUEUE", "20"))
+MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "5"))
 MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
+RECLASSIFY_K       = int(os.environ.get("RECLASSIFY_K", "3"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
@@ -36,9 +38,16 @@ log = setup_logging(_WORKER_ID)
 # None = state unknown (no successful call yet or headers absent).
 _quota_remaining: int | None = None
 _quota_reset_at: int = 0  # Unix timestamp when quota window resets
-_media_failures: int = 0
+_media_recent_failed_ids: collections.deque[str] = collections.deque(maxlen=CIRCUIT_OPEN_THRESHOLD)
 _media_circuit_opened_at: float = 0.0
 _media_blocked_until: float = 0.0   # epoch; media pipeline skipped until this passes
+
+# Per-video reclassification state.
+# _global_success_counter increments on any media success.
+# _video_fail_state[video_id] = (fail_count_since_last_success, success_counter_when_last_failed)
+# Guard: only bump per-video count if other videos succeeded between attempts (API likely up).
+_global_success_counter: int = 0
+_video_fail_state: dict[str, tuple[int, int]] = {}
 
 _subtitle_failures: int = 0
 _subtitle_circuit_opened_at: float = 0.0
@@ -96,7 +105,8 @@ def _quota_sleep_seconds() -> int:
 
 
 def _media_circuit_open() -> bool:
-    return _media_failures >= CIRCUIT_OPEN_THRESHOLD
+    # Deque is deduped on insert, so len == distinct failed videos in window.
+    return len(_media_recent_failed_ids) >= CIRCUIT_OPEN_THRESHOLD
 
 
 def _subtitle_circuit_open() -> bool:
@@ -108,21 +118,28 @@ def _circuit_sleep_seconds(failures: int) -> int:
     return min(CIRCUIT_SLEEP_BASE * (2 ** excess), 3600)
 
 
-def _on_media_success() -> None:
-    global _media_failures, _media_circuit_opened_at
-    if _media_failures > 0:
-        log.info(f"[MEDIA-CIRCUIT-CLOSE] recovered after {_media_failures} consecutive failures")
-    _media_failures = 0
+def _on_media_success(video_id: str | None = None) -> None:
+    global _media_circuit_opened_at, _global_success_counter
+    prior = len(_media_recent_failed_ids)
+    if prior > 0:
+        log.info(f"[MEDIA-CIRCUIT-CLOSE] recovered after {prior} distinct failed videos")
+    _media_recent_failed_ids.clear()
     _media_circuit_opened_at = 0.0
+    _global_success_counter += 1
+    if video_id is not None:
+        _video_fail_state.pop(video_id, None)
 
 
-def _on_media_failure() -> None:
-    global _media_failures, _media_circuit_opened_at
-    _media_failures += 1
+def _on_media_failure(video_id: str) -> None:
+    global _media_circuit_opened_at
+    if video_id in _media_recent_failed_ids:
+        # Same video repeating — already counted, do not bump distinct-id circuit.
+        return
+    _media_recent_failed_ids.appendleft(video_id)
     if _media_circuit_open() and _media_circuit_opened_at == 0.0:
         _media_circuit_opened_at = time.time()
         log.warning(
-            f"[MEDIA-CIRCUIT-OPEN] {_media_failures} consecutive failures "
+            f"[MEDIA-CIRCUIT-OPEN] {len(_media_recent_failed_ids)} distinct failed videos "
             f"— pausing media scout, probe in {CIRCUIT_RESET_AFTER}s"
         )
 
@@ -156,13 +173,18 @@ def persist_quota(conn) -> None:
             cur.execute(
                 """
                 INSERT INTO youtube.api_quota (service, remaining, reset_at, updated_at)
-                VALUES ('rapidapi', %s, to_timestamp(%s)::timestamptz, NOW())
+                VALUES (
+                    'rapidapi',
+                    %s,
+                    CASE WHEN %s > 0 THEN to_timestamp(%s)::timestamptz ELSE NULL END,
+                    NOW()
+                )
                 ON CONFLICT (service) DO UPDATE SET
                     remaining  = EXCLUDED.remaining,
-                    reset_at   = EXCLUDED.reset_at,
+                    reset_at   = COALESCE(EXCLUDED.reset_at, youtube.api_quota.reset_at),
                     updated_at = NOW()
                 """,
-                (_quota_remaining, _quota_reset_at if _quota_reset_at else 0),
+                (_quota_remaining, _quota_reset_at, _quota_reset_at),
             )
             conn.commit()
     except Exception as e:
@@ -194,6 +216,67 @@ def requeue(conn, video_id: str) -> None:
         )
         conn.commit()
     log_event(log, "info", "queue_requeue", "Media job requeued", worker="scout", queue="youtube.videos", video_id=video_id, to_status="queued")
+
+
+def requeue_media_transient(conn, video_id: str, error: str) -> tuple[str, int] | None:
+    """Requeue media scout job after transient API-body error.
+    Increments scout_retry_count and permanently fails at retry cap.
+    At cap, also sets extractor_blocked=true (B-bis safety net)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE youtube.videos
+               SET media_status = CASE
+                       WHEN scout_retry_count + 1 >= %s THEN 'failed'
+                       ELSE 'queued'
+                   END,
+                   extractor_blocked = CASE
+                       WHEN scout_retry_count + 1 >= %s THEN TRUE
+                       ELSE extractor_blocked
+                   END,
+                   media_locked_until = NULL,
+                   media_last_error   = %s,
+                   scout_retry_count  = scout_retry_count + 1,
+                   media_retry_count  = CASE
+                       WHEN scout_retry_count + 1 >= %s THEN media_retry_count + 1
+                       ELSE media_retry_count
+                   END
+               WHERE id = %s
+               RETURNING media_status, scout_retry_count""",
+            (MAX_SCOUT_RETRIES, MAX_SCOUT_RETRIES, error[:500], MAX_SCOUT_RETRIES, video_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+
+    if not row:
+        return None
+
+    new_status, attempts = row
+    if new_status == "failed":
+        log_event(
+            log,
+            "warning",
+            "db_write",
+            "Media marked failed after transient retry cap",
+            worker="scout",
+            table="youtube.videos",
+            video_id=video_id,
+            media_status="failed",
+            error=error[:200],
+            attempt=attempts,
+        )
+    else:
+        log_event(
+            log,
+            "info",
+            "queue_requeue",
+            "Media job requeued after transient API error",
+            worker="scout",
+            queue="youtube.videos",
+            video_id=video_id,
+            to_status="queued",
+            attempt=attempts,
+        )
+    return new_status, attempts
 
 
 def requeue_subtitle(conn, video_id: str) -> None:
@@ -235,6 +318,7 @@ def poll_job(conn):
             WHERE v.id = (
                 SELECT id FROM youtube.videos
                 WHERE media_status = 'queued'
+                  AND NOT extractor_blocked
                   AND (stream_url_expires_at IS NULL
                        OR stream_url_expires_at < NOW() + INTERVAL '4 hours')
                   AND scout_retry_count < %s
@@ -282,6 +366,7 @@ def poll_subtitle_job(conn):
                 SELECT id FROM youtube.videos
                 WHERE subtitle_status = 'pending'
                   AND media_status = 'completed'
+                  AND NOT extractor_blocked
                   AND subtitle_scout_retry_count < %s
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
@@ -469,6 +554,25 @@ def mark_failed(conn, video_id: str, error: str):
     log_event(log, "warning", "db_write", "Media marked failed", worker="scout", table="youtube.videos", video_id=video_id, media_status="failed", error=error[:200])
 
 
+def mark_extractor_blocked(conn, video_id: str, reason: str) -> None:
+    """Mark video as permanently un-extractable by current RapidAPI provider.
+    Future scout polls skip rows with extractor_blocked=TRUE. Operator can un-flag
+    via: UPDATE youtube.videos SET extractor_blocked=false, scout_retry_count=0,
+    media_status='queued' WHERE id=…"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE youtube.videos
+               SET extractor_blocked = TRUE,
+                   media_status      = 'failed',
+                   media_locked_until = NULL,
+                   media_last_error  = %s
+               WHERE id = %s""",
+            (reason[:500], video_id),
+        )
+        conn.commit()
+    log_event(log, "warning", "EXTRACTOR-BLOCKED", "Video marked extractor_blocked (per-video reclassify)", worker="scout", table="youtube.videos", video_id=video_id, reason=reason[:200])
+
+
 def mark_subtitle_queued(conn, video_id: str, payload: dict) -> bool:
     """Insert into subtitle_queue. Returns True if inserted/updated, False if queue full."""
     exp_dt = _subtitle_expiry(payload)
@@ -560,7 +664,7 @@ def process(conn, video_id: str):
     try:
         title, results = get_streams(video_id)
         persist_quota(conn)
-        _on_media_success()
+        _on_media_success(video_id)
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         persist_quota(conn)
@@ -576,8 +680,8 @@ def process(conn, video_id: str):
             _media_blocked_until = time.time() + 60
             return
         if status in (500, 502, 503, 504):
-            _on_media_failure()
-            sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
+            _on_media_failure(video_id)
+            sleep_s = _circuit_sleep_seconds(len(_media_recent_failed_ids)) if _media_circuit_open() else 60
             log.warning(f"[5XX] {video_id}: RapidAPI {status} — requeuing, blocking media {sleep_s}s")
             requeue(conn, video_id)
             _media_blocked_until = time.time() + sleep_s
@@ -590,11 +694,41 @@ def process(conn, video_id: str):
         mark_failed(conn, video_id, str(e))
         return
     except TransientAPIError as e:
-        # Message did NOT match "video not found" → API/extractor down. Trip circuit.
-        _on_media_failure()
-        sleep_s = _circuit_sleep_seconds(_media_failures) if _media_circuit_open() else 60
-        log.warning(f"[TRANSIENT] {video_id}: {e} — requeuing, blocking media {sleep_s}s")
-        requeue(conn, video_id)
+        # Per-video reclassify guard: if SAME video has failed K times with other
+        # videos succeeding between attempts, mark as extractor_blocked (not circuit).
+        prev_count, prev_success = _video_fail_state.get(video_id, (0, -1))
+        if _global_success_counter > prev_success:
+            new_count = prev_count + 1
+        else:
+            new_count = prev_count  # API likely down — don't blame this video
+        _video_fail_state[video_id] = (new_count, _global_success_counter)
+
+        if new_count >= RECLASSIFY_K:
+            mark_extractor_blocked(conn, video_id, f"API body status=error: {e}")
+            _video_fail_state.pop(video_id, None)
+            # Do NOT call _on_media_success/_on_media_failure — blocked is neither.
+            return
+
+        # Default transient path: requeue + bump circuit (deduped per video).
+        result = requeue_media_transient(conn, video_id, str(e))
+        if not result:
+            return
+        new_status, attempts = result
+        if new_status == "failed":
+            # requeue_media_transient already set extractor_blocked at cap (B-bis).
+            log.warning(
+                f"[TRANSIENT-CAP] {video_id}: scout_retry_count={attempts} "
+                f"hit MAX_SCOUT_RETRIES — marked failed + extractor_blocked"
+            )
+            _video_fail_state.pop(video_id, None)
+            return
+        _on_media_failure(video_id)
+        sleep_s = _circuit_sleep_seconds(len(_media_recent_failed_ids)) if _media_circuit_open() else 60
+        log.warning(
+            f"[TRANSIENT] {video_id}: {e} — requeuing "
+            f"(attempt {attempts}/{MAX_SCOUT_RETRIES}, per_video_fails={new_count}), "
+            f"blocking media {sleep_s}s"
+        )
         _media_blocked_until = time.time() + sleep_s
         return
     except (requests.ConnectionError, requests.Timeout) as e:
@@ -730,7 +864,7 @@ def process_subtitle(conn, video_id: str) -> None:
 
 def main():
     global _media_paused, _subtitle_paused, \
-           _media_failures, _media_circuit_opened_at, _media_blocked_until, \
+           _media_circuit_opened_at, _media_blocked_until, \
            _subtitle_failures, _subtitle_circuit_opened_at, _subtitle_blocked_until
     log.info("Scout started — polling for media (queued) and subtitle (pending) jobs...")
     while True:
@@ -759,7 +893,7 @@ def main():
                 # Probe: reset each circuit independently after CIRCUIT_RESET_AFTER seconds
                 if _media_circuit_open() and now - _media_circuit_opened_at >= CIRCUIT_RESET_AFTER:
                     log.info("[MEDIA-CIRCUIT-PROBE] reset for probe")
-                    _media_failures = 0
+                    _media_recent_failed_ids.clear()
                     _media_circuit_opened_at = 0.0
 
                 if _subtitle_circuit_open() and now - _subtitle_circuit_opened_at >= CIRCUIT_RESET_AFTER:
