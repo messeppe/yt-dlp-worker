@@ -360,7 +360,7 @@ def mark_failed(conn, video_id: str, error: str):
 
 
 def mark_url_expired(conn, video_id: str, error: str) -> None:
-    """CDN returned 403/404/410 — URL likely stale, NOT a bad video.
+    """CDN returned 404/410 — URL is stale, NOT a bad video.
     Delete stale queue row, send video back to scout for fresh URL.
     Bumps scout_retry_count; at MAX_SCOUT_RETRIES marks video permanently failed."""
     with conn.cursor() as cur:
@@ -400,7 +400,7 @@ def mark_url_expired(conn, video_id: str, error: str) -> None:
                   to_status="queued", attempt=attempts)
 
 
-def requeue_to_ready(conn, video_id: str) -> None:
+def requeue_to_ready(conn, video_id: str, reason: str = "transient") -> None:
     """Release lock in media_queue — row stays for next worker to claim."""
     with conn.cursor() as cur:
             cur.execute(
@@ -412,7 +412,17 @@ def requeue_to_ready(conn, video_id: str) -> None:
                 (video_id,),
             )
             conn.commit()
-    log_event(log, "info", "queue_requeue", "Media queue lock released", worker="media-mule", queue="youtube.media_queue", video_id=video_id, to_status="ready_for_download")
+    log_event(
+        log,
+        "info",
+        "queue_requeue",
+        "Media queue lock released",
+        worker="media-mule",
+        queue="youtube.media_queue",
+        video_id=video_id,
+        to_status="ready_for_download",
+        reason=reason,
+    )
 
 
 def process(
@@ -486,17 +496,31 @@ def process(
 
     except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response is not None else 0
-        if status in (403, 404, 410):
+        if status in (404, 410):
             log.warning(f"[URL-EXPIRED] {video_id}: HTTP {status} — sending back to scout for fresh URL")
             mark_url_expired(conn, video_id, f"HTTP {status} — CDN URL stale, needs re-scout")
+        elif status == 403:
+            # 403 is usually IP/proxy blocking (not URL TTL expiry), so do not
+            # consume scout retry budget. Keep row ready for another mule pass.
+            log.warning(f"[URL-BLOCKED] {video_id}: HTTP 403 — keeping scout_retry_count, requeue media job")
+            log_event(
+                log,
+                "warning",
+                "URL-BLOCKED",
+                "HTTP 403 while downloading CDN URL",
+                worker="media-mule",
+                video_id=video_id,
+                status=403,
+            )
+            requeue_to_ready(conn, video_id, reason="url_blocked")
         else:
             log.warning(f"[REQUEUE] {video_id}: HTTP {status} transient")
-            requeue_to_ready(conn, video_id)
+            requeue_to_ready(conn, video_id, reason=f"http_{status}")
     except (ConnectionError, OSError, RuntimeError) as e:
         # ConnectionError = retry exhaustion from download_stream
         # RuntimeError = incomplete download after stream closed
         log.warning(f"[REQUEUE] {video_id}: {type(e).__name__} — {e}")
-        requeue_to_ready(conn, video_id)
+        requeue_to_ready(conn, video_id, reason=type(e).__name__)
     except Exception as e:
         log.error(f"[FAIL] {video_id}: {e}", exc_info=True)
         mark_failed(conn, video_id, str(e))

@@ -17,5 +17,5 @@ COPY start_workers.sh .
 RUN chmod +x start_workers.sh
 
 # --- Deployment Command ---
-# Using start_workers.sh to run both Scout and Mule in the same container.
+# All-in-one: start_workers.sh runs Scout + media mule(s) + subtitle mule(s).
 CMD ["./start_workers.sh"]
