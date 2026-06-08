@@ -28,6 +28,13 @@ MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "5"))
 MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
 RECLASSIFY_K       = int(os.environ.get("RECLASSIFY_K", "3"))
+# Canary health probe: the API returns HTTP 200 + status:error whether it's down OR the
+# video is bad, so the only way to tell them apart is to spend a call on a KNOWN-GOOD
+# video. CANARY_VIDEO_ID is that reference id. A real extraction success refreshes health
+# for CANARY_HEALTH_TTL seconds for free, so the canary only fires after a quiet failing
+# spell (≈ at most once per TTL).
+CANARY_VIDEO_ID    = os.environ.get("CANARY_VIDEO_ID", "dQw4w9WgXcQ")
+CANARY_HEALTH_TTL  = int(os.environ.get("CANARY_HEALTH_TTL", "60"))
 
 H264_VIDEO_ITAGS = {160, 133, 134, 135, 136, 137, 264, 266}
 
@@ -48,6 +55,13 @@ _media_blocked_until: float = 0.0   # epoch; media pipeline skipped until this p
 # Guard: only bump per-video count if other videos succeeded between attempts (API likely up).
 _global_success_counter: int = 0
 _video_fail_state: dict[str, tuple[int, int]] = {}
+
+# Canary / API-health state. _api_healthy_until = epoch up to which the API is known up
+# (set by any real success or a passing canary probe); while fresh we skip the probe.
+# _last_good_video_id = most recent successfully-extracted id, used as the canary so the
+# probe tests a video we KNOW is extractable (falls back to CANARY_VIDEO_ID at cold start).
+_api_healthy_until: float = 0.0
+_last_good_video_id: str = CANARY_VIDEO_ID
 
 _subtitle_failures: int = 0
 _subtitle_circuit_opened_at: float = 0.0
@@ -119,15 +133,47 @@ def _circuit_sleep_seconds(failures: int) -> int:
 
 
 def _on_media_success(video_id: str | None = None) -> None:
-    global _media_circuit_opened_at, _global_success_counter
+    global _media_circuit_opened_at, _global_success_counter, _api_healthy_until, _last_good_video_id
     prior = len(_media_recent_failed_ids)
     if prior > 0:
         log.info(f"[MEDIA-CIRCUIT-CLOSE] recovered after {prior} distinct failed videos")
     _media_recent_failed_ids.clear()
     _media_circuit_opened_at = 0.0
     _global_success_counter += 1
+    # A real extraction proves the API is up right now → refresh health for free (no
+    # probe needed) and adopt this id as the canary (a video we KNOW is extractable).
+    _api_healthy_until = time.time() + CANARY_HEALTH_TTL
     if video_id is not None:
+        _last_good_video_id = video_id
         _video_fail_state.pop(video_id, None)
+
+
+def _api_is_up() -> bool:
+    """Is RapidAPI actually serving extractions right now?
+
+    The API lies: HTTP 200 + status:error comes back both when the API is down AND when a
+    specific video is unextractable, so a single failing call cannot tell them apart. The
+    only reliable test is to spend a call on a KNOWN-GOOD video (the canary). The result is
+    cached for CANARY_HEALTH_TTL, and any real success refreshes it for free, so a flaky
+    spell costs at most ~1 canary call per TTL window."""
+    global _api_healthy_until
+    if time.time() < _api_healthy_until:
+        return True  # recently proven up by a success or prior probe — don't burn a call
+    try:
+        _title, results = get_streams(_last_good_video_id)
+    except PermanentVideoError:
+        # Canary itself now reports "video not found" (removed?). Inconclusive → fail safe:
+        # treat the API as down so we do NOT block the original video.
+        log.warning(f"[CANARY] reference {_last_good_video_id} now 'video not found' — treating API as down")
+        return False
+    except Exception as e:  # transient / HTTP / connection errors all mean "can't confirm up"
+        log.warning(f"[CANARY] probe failed ({_last_good_video_id}): {e} — treating API as down")
+        return False
+    if results:
+        _api_healthy_until = time.time() + CANARY_HEALTH_TTL
+        return True
+    log.warning(f"[CANARY] reference {_last_good_video_id} returned no results — API degraded")
+    return False
 
 
 def _on_media_failure(video_id: str) -> None:
@@ -219,9 +265,11 @@ def requeue(conn, video_id: str) -> None:
 
 
 def requeue_media_transient(conn, video_id: str, error: str) -> tuple[str, int] | None:
-    """Requeue media scout job after transient API-body error.
-    Increments scout_retry_count and permanently fails at retry cap.
-    At cap, also sets extractor_blocked=true (B-bis safety net)."""
+    """Requeue media scout job after a transient API-body error.
+    Bumps scout_retry_count; at the retry cap marks 'failed' AND extractor_blocked.
+    Only called when the media circuit is CLOSED (API healthy) — see process(). Reaching
+    the cap then means this video persistently fails while others succeed: a genuine
+    per-video / un-extractable problem worth blocking (operator can un-flag to retry)."""
     with conn.cursor() as cur:
         cur.execute(
             """UPDATE youtube.videos
@@ -694,28 +742,51 @@ def process(conn, video_id: str):
         mark_failed(conn, video_id, str(e))
         return
     except TransientAPIError as e:
-        # Per-video reclassify guard: if SAME video has failed K times with other
-        # videos succeeding between attempts, mark as extractor_blocked (not circuit).
-        prev_count, prev_success = _video_fail_state.get(video_id, (0, -1))
-        if _global_success_counter > prev_success:
-            new_count = prev_count + 1
-        else:
-            new_count = prev_count  # API likely down — don't blame this video
-        _video_fail_state[video_id] = (new_count, _global_success_counter)
-
-        if new_count >= RECLASSIFY_K:
-            mark_extractor_blocked(conn, video_id, f"API body status=error: {e}")
-            _video_fail_state.pop(video_id, None)
-            # Do NOT call _on_media_success/_on_media_failure — blocked is neither.
+        # A transient API-body error ("try again!", "unknown error") is ambiguous: the API
+        # returns 200 + status:error both when it is DOWN and when THIS video is genuinely
+        # un-extractable. A single failing call cannot tell them apart, so we never blame
+        # the video until we have positively confirmed the API is up via a canary probe.
+        #
+        # 1) Circuit already open (many distinct videos failing) = obvious outage. Back
+        #    off, no per-video penalty, and don't even spend a canary call.
+        if _media_circuit_open():
+            requeue(conn, video_id)  # stays 'queued', scout_retry_count untouched
+            _on_media_failure(video_id)  # keep feeding the (already-open) circuit
+            sleep_s = _circuit_sleep_seconds(len(_media_recent_failed_ids))
+            log.warning(
+                f"[TRANSIENT-APIDOWN] {video_id}: {e} — circuit open, backing off {sleep_s}s (no per-video penalty)"
+            )
+            _media_blocked_until = time.time() + sleep_s
             return
 
-        # Default transient path: requeue + bump circuit (deduped per video).
+        # 2) Circuit closed, but the API lies — confirm it is actually serving extractions
+        #    before blaming the video. Canary down => an outage the circuit hasn't caught
+        #    yet: feed the circuit, back off, NO per-video penalty.
+        if not _api_is_up():
+            requeue(conn, video_id)
+            _on_media_failure(video_id)
+            sleep_s = _circuit_sleep_seconds(len(_media_recent_failed_ids)) if _media_circuit_open() else 60
+            log.warning(
+                f"[TRANSIENT-APIDOWN] {video_id}: {e} — canary confirms API down, backing off {sleep_s}s (no penalty)"
+            )
+            _media_blocked_until = time.time() + sleep_s
+            return
+
+        # 3) Canary confirms the API is UP, yet this video still errors -> it is the video.
+        prev_count, _ = _video_fail_state.get(video_id, (0, -1))
+        new_count = prev_count + 1
+        _video_fail_state[video_id] = (new_count, _global_success_counter)
+        if new_count >= RECLASSIFY_K:
+            mark_extractor_blocked(conn, video_id, f"API up (canary ok) but video failed {new_count}x: {e}")
+            _video_fail_state.pop(video_id, None)
+            return
+
+        # Under K -> normal requeue (+ retry-count bump; cap -> failed+blocked inside).
         result = requeue_media_transient(conn, video_id, str(e))
         if not result:
             return
         new_status, attempts = result
         if new_status == "failed":
-            # requeue_media_transient already set extractor_blocked at cap (B-bis).
             log.warning(
                 f"[TRANSIENT-CAP] {video_id}: scout_retry_count={attempts} "
                 f"hit MAX_SCOUT_RETRIES — marked failed + extractor_blocked"

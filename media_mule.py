@@ -266,6 +266,20 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
 
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
+            # 407 = proxy auth / dead subscription, NOT a per-video problem. Park the
+            # bad proxy on a long cooldown and rotate; keep retrying the full budget so
+            # we find a working proxy instead of failing the video.
+            if status == 407 and stream_attempt < STREAM_MAX_RETRIES:
+                sleep_s = min(2**stream_attempt, 15)
+                log.warning(
+                    f"[DOWNLOAD-407] {stream_name} proxy={proxy_idx} — proxy auth failed (dead proxy), swapping, retrying in {sleep_s}s (attempt {stream_attempt}/{STREAM_MAX_RETRIES})"
+                )
+                pool.mark_failed(proxy_idx, cooldown_secs=3600)
+                time.sleep(sleep_s)
+                pool = pick_pool(_proxy_pool, _proxy_pool_b)
+                proxy_idx = pool.pick()
+                proxy_rotations += 1
+                continue
             if status == 403 and stream_attempt < 3:
                 sleep_s = min(2**stream_attempt, 15)
                 log.warning(
