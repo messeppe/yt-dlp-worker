@@ -24,7 +24,8 @@ def main():
         headers=HEADERS, timeout=30,
     ).json()["dashboard"]
     pg = [p for p in d["panels"]
-          if 200 <= p.get("id", 0) <= 219 and p["type"] != "row"]
+          if p["type"] != "row"
+          and any(t.get("rawSql") for t in p.get("targets", []))]
     failures = 0
     for p in pg:
         t = p["targets"][0]
