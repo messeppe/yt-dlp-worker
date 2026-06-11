@@ -47,7 +47,7 @@ services:
       S3_BUCKET: ${S3_BUCKET}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
-      WORKER_COUNT: ${WORKER_COUNT:-20}
+      WORKER_COUNT: ${WORKER_COUNT:-50}
       WORKER_ID: media-mule
     restart: unless-stopped
     tmpfs:
