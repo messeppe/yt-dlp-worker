@@ -22,6 +22,10 @@ MAX_ATTEMPTS_PER_VIDEO = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "20"))
 MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 STREAM_MAX_RETRIES = int(os.environ.get("STREAM_MAX_RETRIES", "15"))
 STREAM_READ_TIMEOUT = int(os.environ.get("STREAM_READ_TIMEOUT", "120"))
+# Size of each bounded Range request. googlevideo throttles open-ended GETs to
+# ~playback speed; bounded chunks reset the throttle window. 0 = disable
+# chunking and fall back to a single open-ended GET (pre-chunking behavior).
+STREAM_CHUNK_MB = int(os.environ.get("STREAM_CHUNK_MB", "10"))
 
 _proxy_pool, _proxy_pool_b = build_pools()
 
@@ -201,11 +205,26 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
     pool = pick_pool(_proxy_pool, _proxy_pool_b)
     proxy_idx = pool.pick()
     proxy_rotations = 0
+    failures = 0
+    chunk_bytes = STREAM_CHUNK_MB * 1024 * 1024
+    use_chunks = chunk_bytes > 0
 
-    for stream_attempt in range(1, STREAM_MAX_RETRIES + 1):
+    log.info(
+        f"[DOWNLOAD] {stream_name} proxy={proxy_idx} chunked={use_chunks} from={format_bytes(downloaded)}"
+    )
+
+    while True:
+        chunk_start = downloaded
         proxy_url = pool.proxy_url(proxy_idx)
         headers = {"Accept-Encoding": "identity"}
-        if downloaded > 0:
+        bounded = False
+        if use_chunks:
+            end = downloaded + chunk_bytes - 1
+            if total > 0:
+                end = min(end, total - 1)
+            headers["Range"] = f"bytes={downloaded}-{end}"
+            bounded = True
+        elif downloaded > 0:
             headers["Range"] = f"bytes={downloaded}-"
 
         try:
@@ -214,23 +233,35 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                 with client.stream("GET", url, headers=headers) as r:
                     r.raise_for_status()
 
-                    if downloaded > 0 and r.status_code == 200:
-                        log.warning(
-                            f"[DOWNLOAD-RESUME-RESET] {stream_name} server ignored Range; restarting"
-                        )
-                        downloaded = 0
-                        if os.path.exists(dest):
-                            os.remove(dest)
-
-                    cl = int(r.headers.get("Content-Length", "0") or "0")
-                    if cl > 0:
-                        total = downloaded + cl if r.status_code == 206 else cl
-                    else:
-                        total = total or 0
-
-                    log.info(
-                        f"[DOWNLOAD] {stream_name} proxy={proxy_idx} attempt={stream_attempt}/{STREAM_MAX_RETRIES} from={format_bytes(downloaded)}"
-                    )
+                    if r.status_code == 200:
+                        # Server ignored Range — full body from byte 0
+                        if downloaded > 0:
+                            log.warning(
+                                f"[DOWNLOAD-RESUME-RESET] {stream_name} server ignored Range; restarting"
+                            )
+                            downloaded = 0
+                            chunk_start = 0
+                            if os.path.exists(dest):
+                                os.remove(dest)
+                        use_chunks = False
+                        bounded = False
+                        total = int(r.headers.get("Content-Length", "0") or "0")
+                    elif total == 0:
+                        # First 206 — learn full size from Content-Range "bytes a-b/total"
+                        cr = r.headers.get("Content-Range", "")
+                        tail = cr.rsplit("/", 1)[-1].strip() if "/" in cr else ""
+                        if tail.isdigit() and int(tail) > 0:
+                            total = int(tail)
+                        elif bounded:
+                            # No total → bounded chunks can't know when to stop;
+                            # consume this chunk, then continue open-ended
+                            log.warning(
+                                f"[DOWNLOAD] {stream_name} no total in Content-Range; disabling chunked mode"
+                            )
+                            use_chunks = False
+                        else:
+                            cl = int(r.headers.get("Content-Length", "0") or "0")
+                            total = downloaded + cl if cl > 0 else 0
 
                     mode = "ab" if downloaded > 0 else "wb"
                     with open(dest, mode) as f:
@@ -256,23 +287,35 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                                     )
                                 last_log = now
 
-                    if total == 0 or downloaded >= total:
-                        break
-                    log.warning(
-                        f"[DOWNLOAD-RETRY] {stream_name} ended cleanly early at {format_bytes(downloaded)}; retrying"
+            if total > 0 and downloaded >= total:
+                break
+            if total == 0 and not bounded:
+                break  # open-ended stream of unknown size ended cleanly
+            if downloaded == chunk_start:
+                # No progress this round — count against the failure budget so a
+                # dead/empty-responding server can't loop forever
+                failures += 1
+                if failures >= STREAM_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"incomplete download after retries: got {downloaded} bytes, expected {total}"
                     )
-                    proxy_idx = pool.pick()
-                    proxy_rotations += 1
+                log.warning(
+                    f"[DOWNLOAD-RETRY] {stream_name} ended cleanly early at {format_bytes(downloaded)}; retrying"
+                )
+                proxy_idx = pool.pick()
+                proxy_rotations += 1
+            # else: chunk made progress — request next range on the same proxy
 
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
+            failures += 1
             # 407 = proxy auth / dead subscription, NOT a per-video problem. Park the
             # bad proxy on a long cooldown and rotate; keep retrying the full budget so
             # we find a working proxy instead of failing the video.
-            if status == 407 and stream_attempt < STREAM_MAX_RETRIES:
-                sleep_s = min(2**stream_attempt, 15)
+            if status == 407 and failures < STREAM_MAX_RETRIES:
+                sleep_s = min(2**failures, 15)
                 log.warning(
-                    f"[DOWNLOAD-407] {stream_name} proxy={proxy_idx} — proxy auth failed (dead proxy), swapping, retrying in {sleep_s}s (attempt {stream_attempt}/{STREAM_MAX_RETRIES})"
+                    f"[DOWNLOAD-407] {stream_name} proxy={proxy_idx} — proxy auth failed (dead proxy), swapping, retrying in {sleep_s}s (attempt {failures}/{STREAM_MAX_RETRIES})"
                 )
                 pool.mark_failed(proxy_idx, cooldown_secs=3600)
                 time.sleep(sleep_s)
@@ -280,10 +323,10 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                 proxy_idx = pool.pick()
                 proxy_rotations += 1
                 continue
-            if status == 403 and stream_attempt < 3:
-                sleep_s = min(2**stream_attempt, 15)
+            if status == 403 and failures < 3:
+                sleep_s = min(2**failures, 15)
                 log.warning(
-                    f"[DOWNLOAD-403] {stream_name} proxy={proxy_idx} — may be IP block, swapping proxy, retrying in {sleep_s}s (attempt {stream_attempt}/{STREAM_MAX_RETRIES})"
+                    f"[DOWNLOAD-403] {stream_name} proxy={proxy_idx} — may be IP block, swapping proxy, retrying in {sleep_s}s (attempt {failures}/{STREAM_MAX_RETRIES})"
                 )
                 pool.mark_failed(proxy_idx)
                 time.sleep(sleep_s)
@@ -298,9 +341,10 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
             httpx.ReadTimeout,
             httpx.ConnectTimeout,
         ) as e:
-            if stream_attempt == STREAM_MAX_RETRIES:
+            failures += 1
+            if failures >= STREAM_MAX_RETRIES:
                 raise
-            sleep_s = min(2**stream_attempt, 15)
+            sleep_s = min(2**failures, 15)
             log.warning(
                 f"[DOWNLOAD-CRASH] {stream_name} proxy={proxy_idx} died at {format_bytes(downloaded)} bytes: {e} — swapping proxy and backing off {sleep_s}s"
             )
