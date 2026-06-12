@@ -451,6 +451,25 @@ def _classify_api_error(message: str) -> type[Exception]:
     return TransientAPIError
 
 
+def _raise_classified_4xx(resp) -> None:
+    """Provider signals extractor outages via 4xx + status:"error" body, not just
+    HTTP 200 (2026-06-12: HTTP 400 "Unknown error occurred" on every call for ~2h;
+    the bare HTTPError path permanently failed 48 healthy videos). Classify the
+    body message exactly like the 200 case so circuit/canary machinery engages.
+    429 (quota) and 407 (proxy auth) keep their dedicated HTTPError handling."""
+    if not (400 <= resp.status_code < 500) or resp.status_code in (407, 429):
+        return
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    if isinstance(body, dict) and body.get("status") == "error":
+        msg = body.get("message") or body.get("msg") or "unknown error"
+        raise _classify_api_error(msg)(
+            f"API HTTP {resp.status_code} status=error: {msg}"
+        )
+
+
 def get_streams(video_id: str):
     url = f"https://{RAPIDAPI_HOST}/download.php"
     log_event(log, "info", "api_call_start", "RapidAPI call started", worker="scout", endpoint="/download.php", video_id=video_id, provider="rapidapi")
@@ -462,6 +481,7 @@ def get_streams(video_id: str):
     )
     _update_quota_state(resp)  # read headers from ALL responses including 429
     log_event(log, "info", "api_call_done", "RapidAPI call completed", worker="scout", endpoint="/download.php", video_id=video_id, provider="rapidapi", status=resp.status_code)
+    _raise_classified_4xx(resp)
     resp.raise_for_status()
     data = resp.json()
     if data.get("status") == "error":
@@ -486,6 +506,7 @@ def get_subtitle_payload(video_id: str) -> dict:
     )
     _update_quota_state(resp)  # read headers before raise_for_status (captures 429 headers too)
     log_event(log, "info", "api_call_done", "RapidAPI call completed", worker="scout", endpoint="/subtitle.php", video_id=video_id, provider="rapidapi", status=resp.status_code)
+    _raise_classified_4xx(resp)
     resp.raise_for_status()
     data = resp.json()
     if data.get("status") == "error":
