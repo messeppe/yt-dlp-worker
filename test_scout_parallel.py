@@ -116,10 +116,21 @@ def test_circuit_resets_to_closed_on_success():
     print("  circuit close on success OK")
 
 
+def test_reclassify_blocked_during_flappy_api():
+    # Recent API-down → flappy → do NOT blame/block the video.
+    scout._media_last_apidown_at = time.time()
+    assert scout._api_recently_flappy(), "should be flappy right after an API-down"
+    # API stably up for longer than the cooldown → blaming the video is allowed.
+    scout._media_last_apidown_at = time.time() - (scout.RECLASSIFY_COOLDOWN + 5)
+    assert not scout._api_recently_flappy(), "should be stable after cooldown elapses"
+    print("  reclassify flappy-guard OK (no block during/after spell, allowed when stable)")
+
+
 if __name__ == "__main__":
     test_rate_limiter_throttles()
     test_rate_limiter_shared_across_threads()
     test_canary_single_flight()
     test_circuit_distinct_thread_safe()
     test_circuit_resets_to_closed_on_success()
+    test_reclassify_blocked_during_flappy_api()
     print("ALL PASS")

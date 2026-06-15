@@ -29,6 +29,11 @@ MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "5"))
 MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
 RECLASSIFY_K       = int(os.environ.get("RECLASSIFY_K", "3"))
+# A video is only blamed (per-video reclassify / extractor_blocked) when the API has
+# been stably up for this long. Within the cooldown of any observed API-down event the
+# API is treated as flappy, so failures never penalise or block the video — they just
+# requeue clean. Prevents a 400-spell from mass-blocking good videos.
+RECLASSIFY_COOLDOWN = int(os.environ.get("RECLASSIFY_COOLDOWN", "900"))
 # Canary health probe: the API returns HTTP 200 + status:error whether it's down OR the
 # video is bad, so the only way to tell them apart is to spend a call on a KNOWN-GOOD
 # video. CANARY_VIDEO_ID is that reference id. A real extraction success refreshes health
@@ -55,6 +60,7 @@ _quota_reset_at: int = 0  # Unix timestamp when quota window resets
 _media_recent_failed_ids: collections.deque[str] = collections.deque(maxlen=CIRCUIT_OPEN_THRESHOLD)
 _media_circuit_opened_at: float = 0.0
 _media_blocked_until: float = 0.0   # epoch; media pipeline skipped until this passes
+_media_last_apidown_at: float = 0.0  # epoch of the most recent observed API-down (canary fail)
 
 # Per-video reclassification state.
 # _global_success_counter increments on any media success.
@@ -213,7 +219,7 @@ def _api_is_up() -> bool:
 
     Single-flight: with multiple worker threads, only one probes at a time; the others
     block on _canary_lock and then reuse the freshly-cached result."""
-    global _api_healthy_until
+    global _api_healthy_until, _media_last_apidown_at
     if time.time() < _api_healthy_until:
         return True  # recently proven up by a success or prior probe — don't burn a call
     if not _canary_lock.acquire(blocking=False):
@@ -228,17 +234,26 @@ def _api_is_up() -> bool:
             # Canary itself now reports "video not found" (removed?). Inconclusive → fail safe:
             # treat the API as down so we do NOT block the original video.
             log.warning(f"[CANARY] reference {_last_good_video_id} now 'video not found' — treating API as down")
+            _media_last_apidown_at = time.time()
             return False
         except Exception as e:  # transient / HTTP / connection errors all mean "can't confirm up"
             log.warning(f"[CANARY] probe failed ({_last_good_video_id}): {e} — treating API as down")
+            _media_last_apidown_at = time.time()
             return False
         if results:
             _api_healthy_until = time.time() + CANARY_HEALTH_TTL
             return True
         log.warning(f"[CANARY] reference {_last_good_video_id} returned no results — API degraded")
+        _media_last_apidown_at = time.time()
         return False
     finally:
         _canary_lock.release()
+
+
+def _api_recently_flappy() -> bool:
+    """True if the API was observed down within RECLASSIFY_COOLDOWN — in which case a
+    momentarily-passing canary is not trustworthy enough to blame/block a video."""
+    return time.time() - _media_last_apidown_at < RECLASSIFY_COOLDOWN
 
 
 def _on_media_failure(video_id: str) -> None:
@@ -860,7 +875,20 @@ def process(conn, video_id: str):
             _media_blocked_until = time.time() + sleep_s
             return
 
-        # 3) Canary confirms the API is UP, yet this video still errors -> it is the video.
+        # 3) Canary says UP this instant — but if the API was observed DOWN within the last
+        #    RECLASSIFY_COOLDOWN, it is merely flapping. A passing canary in a flappy window
+        #    is NOT enough to blame the video: requeue clean (no retry bump, no per-video
+        #    count, no block). Prevents a 400-spell from mass-blocking good videos.
+        if _api_recently_flappy():
+            requeue(conn, video_id)
+            _media_blocked_until = time.time() + 60
+            log.warning(
+                f"[TRANSIENT-FLAPPY] {video_id}: {e} — API unstable in last "
+                f"{RECLASSIFY_COOLDOWN}s, requeue with no penalty (not blaming video)"
+            )
+            return
+
+        # 4) Canary confirms the API has been stably UP, yet this video still errors -> video.
         with _state_lock:
             prev_count, _ = _video_fail_state.get(video_id, (0, -1))
             new_count = prev_count + 1
