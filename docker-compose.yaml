@@ -19,6 +19,11 @@ services:
       MIN_SUBTITLE_QUEUE: ${MIN_SUBTITLE_QUEUE:-5}
       PROXY_URL: ${PROXY_URL}
       PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-100}
+      # Parallel scout: N worker threads sharing one <5 req/s budget; shorter
+      # circuit blackout so scout re-probes RapidAPI sooner after a 400-spell.
+      SCOUT_WORKER_COUNT: ${SCOUT_WORKER_COUNT:-4}
+      SCOUT_MAX_RPS: ${SCOUT_MAX_RPS:-4.5}
+      CIRCUIT_RESET_AFTER: ${CIRCUIT_RESET_AFTER:-300}
     restart: unless-stopped
     logging:
       driver: json-file
