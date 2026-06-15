@@ -308,13 +308,17 @@ def persist_quota(conn) -> None:
 def _media_queue_depth(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM youtube.media_queue")
-        return cur.fetchone()[0]
+        n = cur.fetchone()[0]
+    conn.commit()  # close the read txn so the sweeper conn doesn't sit 'idle in transaction'
+    return n
 
 
 def _subtitle_queue_depth(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM youtube.subtitle_queue")
-        return cur.fetchone()[0]
+        n = cur.fetchone()[0]
+    conn.commit()
+    return n
 
 
 def requeue(conn, video_id: str) -> None:
