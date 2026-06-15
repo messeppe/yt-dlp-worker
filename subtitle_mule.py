@@ -28,6 +28,23 @@ log = setup_logging(_WORKER_ID)
 
 _shutdown = threading.Event()
 
+HEARTBEAT_INTERVAL = float(os.environ.get("HEARTBEAT_INTERVAL", "60"))
+_hb_local = threading.local()
+
+
+def liveness_beat() -> None:
+    """Emit an 'event=heartbeat' line at most once per HEARTBEAT_INTERVAL per
+    worker thread, so an idle worker (empty subtitle queue) still proves it is
+    alive. Absence of this event in Loki => the process is genuinely dead or
+    hung, not merely idle."""
+    now = time.time()
+    if now - getattr(_hb_local, "last", 0.0) < HEARTBEAT_INTERVAL:
+        return
+    _hb_local.last = now
+    name = threading.current_thread().name
+    widx = name.split("_")[-1] if "_" in name else "0"
+    log_event(log, "info", "heartbeat", "worker alive", worker=_WORKER_ID, worker_idx=widx)
+
 
 def handle_sigterm(signum, frame):
     log.info("SIGTERM received — finishing current job then exiting")
@@ -419,6 +436,7 @@ def main():
 
     try:
         while not _shutdown.is_set():
+            liveness_beat()
             try:
                 video_id, payload, channel_handle, title = poll_job(conn)
             except Exception as e:
