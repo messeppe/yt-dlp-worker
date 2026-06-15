@@ -213,20 +213,19 @@ def requeue_to_queued(conn, video_id: str) -> None:
     log_event(log, "info", "queue_requeue", "Subtitle queue lock released", worker="subtitle-mule", queue="youtube.subtitle_queue", video_id=video_id, to_status="queued")
 
 
-def upsert_subtitle(conn, video_id, language_code, is_automated, content, s3_path):
+def upsert_subtitle(conn, video_id, language_code, is_automated, s3_path):
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO youtube.subtitles (video_id, language_code, is_automated, content, s3_path)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO youtube.subtitles (video_id, language_code, is_automated, s3_path)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (video_id, language_code) DO UPDATE SET
                 is_automated = EXCLUDED.is_automated,
-                content      = EXCLUDED.content,
                 s3_path      = EXCLUDED.s3_path
         """,
-            (video_id, language_code, is_automated, content, s3_path),
+            (video_id, language_code, is_automated, s3_path),
         )
-        log_event(log, "info", "db_write", "Upserted subtitle row", worker="subtitle-mule", table="youtube.subtitles", video_id=video_id, language_code=language_code, is_automated=bool(is_automated), s3_path=s3_path, content_bytes=len(content.encode("utf-8")))
+        log_event(log, "info", "db_write", "Upserted subtitle row", worker="subtitle-mule", table="youtube.subtitles", video_id=video_id, language_code=language_code, is_automated=bool(is_automated), s3_path=s3_path)
         conn.commit()
 
 
@@ -386,7 +385,7 @@ def process(conn, video_id, payload, channel_handle, title):
                     log_event(log, "info", "s3_upload", "Uploaded subtitle to s3", worker="subtitle-mule", video_id=video_id, lang=lang, s3_bucket=S3_BUCKET, s3_path=s3_key)
 
                     upsert_subtitle(
-                        conn, video_id, lang, track["is_automated"], content, s3_key
+                        conn, video_id, lang, track["is_automated"], s3_key
                     )
                     log.info(f"[DB] {video_id} lang={lang} upserted")
                     success_count += 1
