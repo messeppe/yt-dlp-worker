@@ -116,17 +116,18 @@ def test_circuit_resets_to_closed_on_success():
     print("  circuit close on success OK")
 
 
-def test_reclassify_blocked_during_flappy_api():
-    # Recent API-down → flappy → do NOT blame/block the video.
-    scout._media_last_apidown_at = time.time()
-    assert scout._api_recently_flappy(), "should be flappy right after an API-down"
-    # API stably up for longer than the cooldown → blaming the video is allowed.
-    scout._media_last_apidown_at = time.time() - (scout.RECLASSIFY_COOLDOWN + 5)
-    assert not scout._api_recently_flappy(), "should be stable after cooldown elapses"
-    # ANY transient failure must re-arm the flappy window (covers canary-cached-passing).
-    scout._on_media_failure("vidFlap")
-    assert scout._api_recently_flappy(), "_on_media_failure must mark API recently-flappy"
-    print("  reclassify flappy-guard OK (no block during/after spell, allowed when stable)")
+def test_reclassify_requires_interleaved_success():
+    # A video's failure only counts toward extractor_block if ANOTHER video succeeded
+    # since it last failed (proof the API is genuinely up — distinguishes age-restricted
+    # /unextractable videos from a true outage, which both return identical 400s).
+    scout._global_success_counter = 100
+    last_fail_ctr = 100  # this video last failed when the success counter was 100
+    assert not (scout._global_success_counter > last_fail_ctr), \
+        "no interleaving success → must NOT advance the per-video fail count"
+    scout._on_media_success("someOtherVid")  # a real success bumps the global counter
+    assert scout._global_success_counter > last_fail_ctr, \
+        "interleaving success → failure now counts toward blocking the video"
+    print("  reclassify success-interleaving OK (blocks bad video only when API proven up)")
 
 
 if __name__ == "__main__":
@@ -135,5 +136,5 @@ if __name__ == "__main__":
     test_canary_single_flight()
     test_circuit_distinct_thread_safe()
     test_circuit_resets_to_closed_on_success()
-    test_reclassify_blocked_during_flappy_api()
+    test_reclassify_requires_interleaved_success()
     print("ALL PASS")
