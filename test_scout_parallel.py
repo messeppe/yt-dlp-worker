@@ -123,6 +123,9 @@ def test_reclassify_blocked_during_flappy_api():
     # API stably up for longer than the cooldown → blaming the video is allowed.
     scout._media_last_apidown_at = time.time() - (scout.RECLASSIFY_COOLDOWN + 5)
     assert not scout._api_recently_flappy(), "should be stable after cooldown elapses"
+    # ANY transient failure must re-arm the flappy window (covers canary-cached-passing).
+    scout._on_media_failure("vidFlap")
+    assert scout._api_recently_flappy(), "_on_media_failure must mark API recently-flappy"
     print("  reclassify flappy-guard OK (no block during/after spell, allowed when stable)")
 
 

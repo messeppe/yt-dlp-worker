@@ -257,7 +257,13 @@ def _api_recently_flappy() -> bool:
 
 
 def _on_media_failure(video_id: str) -> None:
-    global _media_circuit_opened_at
+    global _media_circuit_opened_at, _media_last_apidown_at
+    # Any transient media failure is live evidence the API is troubled right now. Refresh
+    # the flappy window unconditionally (before the dedup return) so the per-video
+    # reclassify cannot blame/block videos during a spell — even one where the canary
+    # intermittently passes. A video is only blocked after RECLASSIFY_COOLDOWN with NO
+    # transient failures at all (API stably healthy → the fault really is that video).
+    _media_last_apidown_at = time.time()
     with _state_lock:
         if video_id in _media_recent_failed_ids:
             # Same video repeating — already counted, do not bump distinct-id circuit.
