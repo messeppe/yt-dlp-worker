@@ -6,6 +6,9 @@ services:
       - traefik.enable=false
       - app=videomasjid
       - service=yt-scout
+    networks:
+      - default
+      - supabase_net
     environment:
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
@@ -38,6 +41,9 @@ services:
       - traefik.enable=false
       - app=videomasjid
       - service=yt-media-mule
+    networks:
+      - default
+      - supabase_net
     environment:
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
@@ -71,6 +77,9 @@ services:
       - traefik.enable=false
       - app=videomasjid
       - service=yt-subtitle-mule
+    networks:
+      - default
+      - supabase_net
     environment:
       SUPABASE_DB_URL: ${SUPABASE_DB_URL}
       RAPIDAPI_KEY: ${RAPIDAPI_KEY}
@@ -96,3 +105,9 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+networks:
+  default:
+  supabase_net:
+    name: gy2d24tm9ablk9t4aaiqt2ac
+    external: true
