@@ -14,8 +14,17 @@ services:
     labels:
       - app=videomasjid
       - service=yt-daily-report
+    networks:
+      - default
+      - supabase_net
     logging:
       driver: json-file
       options:
         max-size: 10m
         max-file: '3'
+
+networks:
+  default:
+  supabase_net:
+    name: gy2d24tm9ablk9t4aaiqt2ac
+    external: true
