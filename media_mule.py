@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import signal
 import threading
 import time
@@ -340,12 +341,16 @@ def download_stream(url: str, dest: str, initial_proxy: dict = None,
                 proxy_idx = pool.pick()
                 proxy_rotations += 1
                 continue
-            if status == 403 and failures < 3:
-                sleep_s = min(2**failures, 15)
+            if status == 403 and failures < STREAM_MAX_RETRIES:
+                # googlevideo 403s Decodo DC IPs in intermittent waves that hit ~all
+                # IPs at once. Do NOT mark_failed (the IP isn't bad, the wave is
+                # transient — cooling it just shrinks the pool and concentrates load).
+                # Use the full retry budget with decorrelated jitter so swaps land in
+                # a calm window instead of giving up after a few tries.
+                sleep_s = round(min(2**failures, 20) * random.uniform(0.5, 1.5), 1)
                 log.warning(
-                    f"[DOWNLOAD-403] {stream_name} proxy={proxy_idx} — may be IP block, swapping proxy, retrying in {sleep_s}s (attempt {failures}/{STREAM_MAX_RETRIES})"
+                    f"[DOWNLOAD-403] {stream_name} proxy={proxy_idx} — googlevideo 403 (transient IP-reputation wave), swapping proxy, retrying in {sleep_s}s (attempt {failures}/{STREAM_MAX_RETRIES})"
                 )
-                pool.mark_failed(proxy_idx)
                 time.sleep(sleep_s)
                 pool = pick_pool(_proxy_pool, _proxy_pool_b)
                 proxy_idx = pool.pick()
