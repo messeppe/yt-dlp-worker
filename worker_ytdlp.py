@@ -63,8 +63,10 @@ _BLOCK_MARKERS = (
 )
 
 _BOT_MARKERS = (
+    # YouTube often uses U+2019 (’) in "you're" — normalize in _classify_error.
     "sign in to confirm you're not a bot",
     "confirm you're not a bot",
+    "not a bot",
     "http error 403",
     "403: forbidden",
 )
@@ -101,7 +103,8 @@ def sanitize_path_segment(s: str) -> str:
 
 
 def _classify_error(msg: str) -> str:
-    low = (msg or "").lower()
+    # Normalize curly apostrophes YouTube embeds in bot-check messages.
+    low = (msg or "").lower().replace("\u2019", "'").replace("\u2018", "'")
     if any(m in low for m in _BLOCK_MARKERS):
         return "blocked"
     if any(m in low for m in _BOT_MARKERS):

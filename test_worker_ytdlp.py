@@ -22,6 +22,12 @@ class ClassifyErrorTests(unittest.TestCase):
             w._classify_error("Sign in to confirm you're not a bot"), "bot"
         )
 
+    def test_bot_check_curly_apostrophe(self):
+        # YouTube uses U+2019 in live errors
+        self.assertEqual(
+            w._classify_error("Sign in to confirm you\u2019re not a bot"), "bot"
+        )
+
     def test_403_is_bot(self):
         self.assertEqual(w._classify_error("HTTP Error 403: Forbidden"), "bot")
 
