@@ -27,6 +27,8 @@ services:
       SCOUT_WORKER_COUNT: ${SCOUT_WORKER_COUNT:-4}
       SCOUT_MAX_RPS: ${SCOUT_MAX_RPS:-4.5}
       CIRCUIT_RESET_AFTER: ${CIRCUIT_RESET_AFTER:-300}
+      # 0 = yt-ytdlp-mule owns media (no RapidAPI CDN extract). Subtitles still run.
+      SCOUT_MEDIA_ENABLED: ${SCOUT_MEDIA_ENABLED:-0}
     restart: unless-stopped
     logging:
       driver: json-file
@@ -34,6 +36,8 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  # Legacy RapidAPI CDN mule — idle when SCOUT_MEDIA_ENABLED=0 (media_queue empty).
+  # Keep for rollback: set SCOUT_MEDIA_ENABLED=1 and scale this WORKER_COUNT back up.
   yt-media-mule:
     build: .
     command: python media_mule.py
@@ -59,11 +63,58 @@ services:
       S3_BUCKET: ${S3_BUCKET}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
-      WORKER_COUNT: ${WORKER_COUNT:-50}
+      WORKER_COUNT: ${MEDIA_MULE_WORKER_COUNT:-1}
       WORKER_ID: media-mule
     restart: unless-stopped
     tmpfs:
       - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Primary media path (2026-07): yt-dlp extract+download on same sticky Decodo IP.
+  yt-ytdlp-mule:
+    build:
+      context: .
+      dockerfile: Dockerfile.ytdlp
+    labels:
+      - traefik.enable=false
+      - app=videomasjid
+      - service=yt-ytdlp-mule
+    networks:
+      - default
+      - supabase_net
+    environment:
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      MAX_SCOUT_RETRIES: ${MAX_SCOUT_RETRIES:-5}
+      MAX_VIDEO_QUALITY: ${MAX_VIDEO_QUALITY:-720}
+      MAX_ATTEMPTS_PER_VIDEO: ${YTDLP_MAX_ATTEMPTS:-3}
+      PROXY_URL: ${PROXY_URL}
+      PROXY_BASE_PORT: ${PROXY_BASE_PORT:-10000}
+      PROXY_POOL_SIZE: ${PROXY_POOL_SIZE:-1000}
+      PROXY_NAME: ${PROXY_NAME:-decodo}
+      PROXY_B_URL: ${PROXY_B_URL:-}
+      PROXY_B_BASE_PORT: ${PROXY_B_BASE_PORT:-0}
+      PROXY_B_POOL_SIZE: ${PROXY_B_POOL_SIZE:-100}
+      PROXY_B_NAME: ${PROXY_B_NAME:-webshare}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      WORKER_COUNT: ${YTDLP_WORKER_COUNT:-4}
+      WORKER_ID: ytdlp-mule
+      YTDLP_JS_RUNTIME: ${YTDLP_JS_RUNTIME:-deno}
+      YTDLP_SLEEP_MIN: ${YTDLP_SLEEP_MIN:-5}
+      YTDLP_SLEEP_MAX: ${YTDLP_SLEEP_MAX:-10}
+      # 0 first; set 1 if android_vr/default clients 403 without PO tokens.
+      ENABLE_BGUTIL: ${ENABLE_BGUTIL:-0}
+    restart: unless-stopped
+    # Real disk — long videos exceed typical tmpfs.
+    volumes:
+      - ytdlp_tmp:/tmp
     logging:
       driver: json-file
       options:
@@ -111,3 +162,6 @@ networks:
   supabase_net:
     name: gy2d24tm9ablk9t4aaiqt2ac
     external: true
+
+volumes:
+  ytdlp_tmp:

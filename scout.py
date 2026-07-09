@@ -29,6 +29,9 @@ MIN_SUBTITLE_QUEUE = int(os.environ.get("MIN_SUBTITLE_QUEUE", "5"))
 MAX_SCOUT_RETRIES  = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 RAPIDAPI_TIMEOUT   = int(os.environ.get("RAPIDAPI_TIMEOUT", "60"))
 RECLASSIFY_K       = int(os.environ.get("RECLASSIFY_K", "3"))
+# Kill switch: set SCOUT_MEDIA_ENABLED=0 when yt-ytdlp-mule owns media downloads
+# (avoids racing RapidAPI CDN extract against same queued rows).
+SCOUT_MEDIA_ENABLED = os.environ.get("SCOUT_MEDIA_ENABLED", "1") == "1"
 # Canary health probe: the API returns HTTP 200 + status:error whether it's down OR the
 # video is bad, so the only way to tell them apart is to spend a call on a KNOWN-GOOD
 # video. CANARY_VIDEO_ID is that reference id. A real extraction success refreshes health
@@ -1116,8 +1119,13 @@ def worker_loop() -> None:
                 now = time.time()
                 did_work = False
 
-                # Media pipeline — skip if paused, circuit open, or in backoff window.
-                if not _media_paused and not _media_circuit_open() and now >= _media_blocked_until:
+                # Media pipeline — skip if disabled (ytdlp mule mode), paused, circuit open, or backoff.
+                if (
+                    SCOUT_MEDIA_ENABLED
+                    and not _media_paused
+                    and not _media_circuit_open()
+                    and now >= _media_blocked_until
+                ):
                     video_id = poll_job(conn)
                     if video_id:
                         log_event(log, "info", "queue_claim", "Media job claimed", worker="scout", queue="youtube.videos", video_id=video_id, media_status="processing")
@@ -1159,7 +1167,10 @@ def worker_loop() -> None:
 
 
 def main():
-    log.info(f"Scout started — {SCOUT_WORKER_COUNT} worker thread(s), max {SCOUT_MAX_RPS} req/s")
+    log.info(
+        f"Scout started — {SCOUT_WORKER_COUNT} worker thread(s), max {SCOUT_MAX_RPS} req/s, "
+        f"media_enabled={SCOUT_MEDIA_ENABLED}"
+    )
     sweeper = threading.Thread(target=sweeper_loop, name="scout-sweeper", daemon=True)
     sweeper.start()
     try:
