@@ -19,12 +19,15 @@ import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-# Preload bgutil base BEFORE yt_dlp's plugin discovery. yt-dlp loads
-# getpot_bgutil_http/script first; those import BgUtilPTPBase while the base
-# module is still incomplete → ImportError. Direct import breaks the cycle.
+# Preload bgutil BEFORE yt_dlp's plugin discovery (avoids BgUtilPTPBase
+# circular ImportError + "already registered" races across worker threads).
 _ENABLE_BGUTIL_EARLY = os.environ.get("ENABLE_BGUTIL", "0") == "1"
 if _ENABLE_BGUTIL_EARLY:
     import yt_dlp_plugins.extractor.getpot_bgutil  # noqa: F401
+    try:
+        import yt_dlp_plugins.extractor.getpot_bgutil_http  # noqa: F401
+    except Exception:
+        pass
 
 import yt_dlp
 import boto3
@@ -121,7 +124,14 @@ def _classify_error(msg: str) -> str:
 
 class YtDlpLogger:
     def debug(self, msg):
-        if isinstance(msg, str) and msg.startswith("[debug]"):
+        if not isinstance(msg, str):
+            return
+        # Keep PO/provider evidence visible; drop the rest of yt-dlp debug spam.
+        low = msg.lower()
+        if "[pot" in low or "po token" in low or "bgutil" in low:
+            log.info(f"[YTDLP] {msg}")
+            return
+        if msg.startswith("[debug]"):
             return
         log.debug(msg)
 
@@ -330,10 +340,11 @@ def _ydl_opts(tmpdir: str, proxy_url: str | None) -> dict:
         "fragment_retries": 5,
         "concurrent_fragment_downloads": 4,
         "noprogress": True,
-        # Prefer clients that often work without PO / cookies. android_vr: no PO.
+        # Phase 1 (android_vr-first) was flat: PO never consumed. Prefer mweb so
+        # bgutil GVS PO is actually requested; keep android_vr as fallback.
         "extractor_args": {
             "youtube": {
-                "player_client": ["android_vr", "tv", "web_embedded", "mweb"],
+                "player_client": ["mweb", "android_vr", "web_embedded", "tv"],
             }
         },
         "js_runtimes": {JS_RUNTIME: {}},

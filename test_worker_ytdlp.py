@@ -82,7 +82,9 @@ class YdlOptsTests(unittest.TestCase):
         self.assertEqual(opts["proxy"], "http://user:pass@dc.decodo.com:10001")
         self.assertIn("deno", opts["js_runtimes"])
         self.assertEqual(opts["remote_components"], ["ejs:github"])
-        self.assertIn("android_vr", opts["extractor_args"]["youtube"]["player_client"])
+        clients = opts["extractor_args"]["youtube"]["player_client"]
+        self.assertEqual(clients[0], "mweb")
+        self.assertIn("android_vr", clients)
 
 
 if __name__ == "__main__":
