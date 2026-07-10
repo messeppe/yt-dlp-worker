@@ -19,6 +19,13 @@ import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
+# Preload bgutil base BEFORE yt_dlp's plugin discovery. yt-dlp loads
+# getpot_bgutil_http/script first; those import BgUtilPTPBase while the base
+# module is still incomplete → ImportError. Direct import breaks the cycle.
+_ENABLE_BGUTIL_EARLY = os.environ.get("ENABLE_BGUTIL", "0") == "1"
+if _ENABLE_BGUTIL_EARLY:
+    import yt_dlp_plugins.extractor.getpot_bgutil  # noqa: F401
+
 import yt_dlp
 import boto3
 import psycopg2
