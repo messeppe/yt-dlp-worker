@@ -21,7 +21,15 @@
 | `memory-bank/ytdlp-selfhost-2026-07-09.md` | Record outcome |
 | `memory-bank/index.md` | Session handoff |
 
-No worker Python changes in Phase 1.
+**Amendment (2026-07-10 execution):** Coolify already had `ENABLE_BGUTIL=1` since 2026-07-09, and `start.sh` printed `bgutil server ready` / banner `bgutil=True`. But Loki showed:
+
+`ImportError: cannot import name 'BgUtilPTPBase' from yt_dlp_plugins.extractor.getpot_bgutil`
+
+So the HTTP server was up while the **pip plugin failed to load** → PO tokens were never injected. Phase 1 requires a **rebuild** that pins server git tag + pip plugin to the **same** release (`1.3.1`), plus a Dockerfile import smoke check.
+
+Files touched for the amendment:
+- Modify: `Dockerfile.ytdlp` (pin `--branch 1.3.1`, `npm ci`, import check)
+- Modify: `requirements_ytdlp.txt` (`bgutil-ytdlp-pot-provider==1.3.1`)
 
 ---
 

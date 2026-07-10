@@ -36,7 +36,9 @@ Existing `PROXY_URL`, `SUPABASE_DB_URL`, `S3_*` unchanged.
 1. Coolify logs `yt-ytdlp-mule`: `yt-dlp mule started`, Deno version, `YTDLP-START` / `YTDLP-OK`.
 2. Scout banner: `media_enabled=False`.
 3. DB: `media_files` rows with `download_source='ytdlp'`; `media_status=completed` growing.
-4. If mass bot/403: set `ENABLE_BGUTIL=1` and redeploy (still no Google cookies).
+4. If mass bot/403: set `ENABLE_BGUTIL=1` and **rebuild** (still no Google cookies).
+   - Server git tag and pip plugin must be the **same** release (pinned `1.3.1` in `Dockerfile.ytdlp` + `requirements_ytdlp.txt`).
+   - Boot must show `bgutil server ready`, banner `bgutil=True`, and **no** `ImportError: BgUtilPTPBase` / `Error while importing module ... getpot_bgutil`.
 
 ## Not done by this change
 - Live smoke download on Coolify (needs deploy + Decodo).
