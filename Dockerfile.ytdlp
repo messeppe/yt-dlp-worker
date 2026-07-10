@@ -22,17 +22,8 @@ COPY requirements_ytdlp.txt .
 # Direct import works; bare `yt-dlp` CLI can still hit a plugin load-order cycle.
 # Runtime fix: worker_ytdlp.py preloads getpot_bgutil before importing yt_dlp.
 RUN pip install --no-cache-dir -r requirements_ytdlp.txt \
-    && python - <<'PY'
-from yt_dlp_plugins.extractor.getpot_bgutil import BgUtilPTPBase
-print("bgutil plugin OK", BgUtilPTPBase)
-import yt_dlp_plugins.extractor.getpot_bgutil  # preload base
-import yt_dlp
-from yt_dlp.YoutubeDL import YoutubeDL
-# Force plugin registration the same way the mule does
-with YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
-    pass
-print("yt-dlp YoutubeDL init OK after bgutil preload")
-PY
+    && python -c "from yt_dlp_plugins.extractor.getpot_bgutil import BgUtilPTPBase; print('bgutil plugin OK', BgUtilPTPBase)" \
+    && python -c "import yt_dlp_plugins.extractor.getpot_bgutil; from yt_dlp.YoutubeDL import YoutubeDL; YoutubeDL({'quiet': True, 'skip_download': True}).close(); print('yt-dlp YoutubeDL init OK after bgutil preload')" \
     && yt-dlp --version
 
 WORKDIR /app
