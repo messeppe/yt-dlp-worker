@@ -87,5 +87,56 @@ class YdlOptsTests(unittest.TestCase):
         self.assertIn("android_vr", clients)
 
 
+class RequeueCapTests(unittest.TestCase):
+    """requeue() must terminalize at MAX_SCOUT_RETRIES, else rows bump past the
+    poll_job filter and sit 'queued' forever (the backlog-panel zombie floor)."""
+
+    def _conn(self, returning):
+        cur = MagicMock()
+        cur.fetchone.return_value = returning
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cur
+        return conn, cur
+
+    def test_cap_is_applied_in_sql(self):
+        conn, cur = self._conn(("queued", 3))
+        with patch.object(w, "MAX_SCOUT_RETRIES", 10), patch.object(w, "log_event"):
+            w.requeue(conn, "vid1", "bot check")
+        sql, params = cur.execute.call_args[0]
+        self.assertIn("scout_retry_count + 1 >= %s", sql)
+        self.assertIn("extractor_blocked", sql)
+        self.assertEqual(params[0], 10)
+        self.assertEqual(params[-1], "vid1")
+
+    def test_below_cap_requeues(self):
+        conn, _ = self._conn(("queued", 3))
+        with patch.object(w, "MAX_SCOUT_RETRIES", 10), \
+                patch.object(w, "log_event") as ev:
+            w.requeue(conn, "vid1", "bot check")
+        events = [c[0][2] for c in ev.call_args_list]
+        self.assertEqual(events, ["queue_requeue"])
+
+    def test_at_cap_emits_extractor_blocked(self):
+        conn, _ = self._conn(("failed", 10))
+        with patch.object(w, "MAX_SCOUT_RETRIES", 10), \
+                patch.object(w, "log_event") as ev:
+            w.requeue(conn, "vid1", "bot check")
+        events = [c[0][2] for c in ev.call_args_list]
+        self.assertEqual(events, ["EXTRACTOR-BLOCKED"])
+
+    def test_missing_row_is_noop(self):
+        conn, _ = self._conn(None)
+        with patch.object(w, "MAX_SCOUT_RETRIES", 10), \
+                patch.object(w, "log_event") as ev:
+            w.requeue(conn, "gone", "bot check")
+        ev.assert_not_called()
+
+    def test_poll_job_and_requeue_share_the_cap(self):
+        conn, cur = self._conn(None)
+        with patch.object(w, "MAX_SCOUT_RETRIES", 10):
+            w.poll_job(conn)
+        self.assertEqual(cur.execute.call_args[0][1], (10,))
+
+
 if __name__ == "__main__":
     unittest.main()

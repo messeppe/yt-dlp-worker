@@ -43,6 +43,7 @@ DB_URL = os.environ["SUPABASE_DB_URL"]
 
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS_PER_VIDEO", "3"))
+MAX_SCOUT_RETRIES = int(os.environ.get("MAX_SCOUT_RETRIES", "5"))
 MAX_HEIGHT = int(os.environ.get("MAX_VIDEO_QUALITY", "720"))
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))
 SLEEP_MIN = float(os.environ.get("YTDLP_SLEEP_MIN", "5"))
@@ -173,7 +174,7 @@ def poll_job(conn):
                 ) AS channel_handle,
                 COALESCE(v.title, v.id) AS title
             """,
-            (int(os.environ.get("MAX_SCOUT_RETRIES", "5")),),
+            (MAX_SCOUT_RETRIES,),
         )
         row = cur.fetchone()
         conn.commit()
@@ -305,17 +306,59 @@ def mark_extractor_blocked(conn, video_id: str, reason: str):
 
 
 def requeue(conn, video_id: str, error: str):
+    """Requeue after a transient (bot-check) ytdlp failure.
+    Bumps scout_retry_count; at the cap marks 'failed' AND extractor_blocked —
+    same contract as scout.requeue_media_transient. Without the cap branch the row
+    keeps bumping past MAX_SCOUT_RETRIES and stays 'queued' forever: invisible to
+    poll_job, permanently counted in the backlog panel."""
     with conn.cursor() as cur:
         cur.execute(
             """UPDATE youtube.videos
-               SET media_status = 'queued',
+               SET media_status = CASE
+                       WHEN scout_retry_count + 1 >= %s THEN 'failed'
+                       ELSE 'queued'
+                   END,
+                   extractor_blocked = CASE
+                       WHEN scout_retry_count + 1 >= %s THEN TRUE
+                       ELSE extractor_blocked
+                   END,
                    media_locked_until = NULL,
                    media_last_error = %s,
-                   scout_retry_count = scout_retry_count + 1
-               WHERE id = %s""",
-            (error[:500], video_id),
+                   scout_retry_count = scout_retry_count + 1,
+                   media_retry_count = CASE
+                       WHEN scout_retry_count + 1 >= %s THEN media_retry_count + 1
+                       ELSE media_retry_count
+                   END
+               WHERE id = %s
+               RETURNING media_status, scout_retry_count""",
+            (MAX_SCOUT_RETRIES, MAX_SCOUT_RETRIES, error[:500],
+             MAX_SCOUT_RETRIES, video_id),
         )
+        row = cur.fetchone()
         conn.commit()
+
+    if not row:
+        return
+
+    new_status, attempts = row
+    if new_status == "failed":
+        log.warning(
+            f"[BOT-CAP] {video_id}: scout_retry_count={attempts} hit "
+            f"MAX_SCOUT_RETRIES — marked failed + extractor_blocked"
+        )
+        log_event(
+            log,
+            "warning",
+            "EXTRACTOR-BLOCKED",
+            "Video marked extractor_blocked after bot-check retry cap",
+            worker=_WORKER_ID,
+            table="youtube.videos",
+            video_id=video_id,
+            reason=error[:200],
+            attempts=attempts,
+        )
+        return
+
     log_event(
         log,
         "info",
@@ -325,6 +368,7 @@ def requeue(conn, video_id: str, error: str):
         queue="youtube.videos",
         video_id=video_id,
         to_status="queued",
+        attempts=attempts,
     )
 
 
